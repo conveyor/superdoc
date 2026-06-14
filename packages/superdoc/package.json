@@ -213,7 +213,7 @@
     "vite-plugin-dts": "catalog:",
     "vite-plugin-node-polyfills": "catalog:",
     "vitest": "catalog:",
-    "ws": "^8.18.3",
+    "ws": "^8.20.1",
     "xml-js": "catalog:"
   }
 }
