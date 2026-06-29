@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSuperDocContentControls, useSuperDocHost } from 'superdoc/ui/react';
-import type { SelectionTarget } from './citations-types';
+import type { SelectionTarget, TextSegment } from './citations-types';
 
 /** Namespace for annotation metadata entries. */
 export const ANNOTATIONS_NAMESPACE = 'urn:demo:annotations:1';
@@ -9,6 +9,13 @@ export const ANNOTATIONS_NAMESPACE = 'urn:demo:annotations:1';
 export type AnnotationPayload = {
   annotationId: string;
   createdAt: string;
+  /**
+   * 0-based order of this fragment within its annotation. Only set for
+   * cross-block annotations (see `attachAcrossBlocks`), where one logical
+   * annotation is stored as several single-block fragments sharing an
+   * `annotationId`.
+   */
+  segmentIndex?: number;
 };
 
 /** Full annotation info including metadata wrapper fields. */
@@ -68,6 +75,14 @@ export type UseAnnotationsResult = {
   loading: boolean;
   /** Attach an annotation to the current selection. Returns the new ID or an error. */
   attach(target: SelectionTarget): { id: string } | { error: string };
+  /**
+   * Attach ONE logical annotation across MULTIPLE blocks. `metadata.attach`
+   * is single-block in v1, so we fan out: one anchor per block-segment, all
+   * sharing the same `annotationId` in their payload. Group by that id on read
+   * to treat the fragments as a single annotation. Returns the shared id and
+   * how many fragments were attached, or an error.
+   */
+  attachAcrossBlocks(segments: TextSegment[]): { annotationId: string; count: number } | { error: string };
   /** Remove an annotation by ID. */
   remove(id: string): { error?: string };
   /** Resolve an annotation ID to its current SelectionTarget. */
@@ -124,6 +139,45 @@ export function useAnnotations(): UseAnnotationsResult {
     [host, refresh],
   );
 
+  const attachAcrossBlocks = useCallback(
+    (segments: TextSegment[]): { annotationId: string; count: number } | { error: string } => {
+      const api = readMetadataApi(host);
+      if (!api) return { error: 'Editor not ready.' };
+
+      // One shared id ties the per-block fragments into a single logical
+      // annotation. Each fragment is its own single-block metadata entry.
+      const annotationId = `ann-${Math.random().toString(36).slice(2, 10)}`;
+      const createdAt = new Date().toISOString();
+
+      let count = 0;
+      let firstError: string | null = null;
+      segments.forEach((segment, segmentIndex) => {
+        // Skip empty segments — metadata.attach rejects empty ranges.
+        if (segment.range.end <= segment.range.start) return;
+
+        const target: SelectionTarget = {
+          kind: 'selection',
+          start: { kind: 'text', blockId: segment.blockId, offset: segment.range.start },
+          end: { kind: 'text', blockId: segment.blockId, offset: segment.range.end },
+        };
+        const payload: AnnotationPayload = { annotationId, createdAt, segmentIndex };
+        const result = api.attach({
+          target,
+          namespace: ANNOTATIONS_NAMESPACE,
+          payload,
+          id: `annotation-${Date.now()}-${segmentIndex}`,
+        });
+        if (result.success) count += 1;
+        else if (!firstError) firstError = result.failure.message;
+      });
+
+      if (count === 0) return { error: firstError ?? 'Nothing to annotate.' };
+      refresh();
+      return { annotationId, count };
+    },
+    [host, refresh],
+  );
+
   const remove = useCallback(
     (id: string) => {
       const api = readMetadataApi(host);
@@ -147,5 +201,5 @@ export function useAnnotations(): UseAnnotationsResult {
     [host],
   );
 
-  return { annotations, loading, attach, remove, resolve, refresh };
+  return { annotations, loading, attach, attachAcrossBlocks, remove, resolve, refresh };
 }

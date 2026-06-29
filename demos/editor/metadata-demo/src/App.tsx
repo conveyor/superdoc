@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { SuperDocUIProvider, useSuperDocHost } from 'superdoc/ui/react';
 import { EditorMount } from './editor/EditorMount';
-import { Toolbar, MetadataButton, HighlightToggle } from './components/Toolbar';
+import { Toolbar, MetadataButton, CrossBlockMetadataButton, HighlightToggle } from './components/Toolbar';
 import { MetadataPanel } from './components/MetadataPanel';
 import { MetadataHighlights } from './components/MetadataHighlights';
 
@@ -95,6 +95,7 @@ function AppInner() {
         <aside className="sidebar">
           <div className="sidebar-toolbar">
             <MetadataButton />
+            <CrossBlockMetadataButton />
             <HighlightToggle
               enabled={highlightEnabled}
               onToggle={() => setHighlightEnabled((v) => !v)}

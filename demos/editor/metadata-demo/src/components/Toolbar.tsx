@@ -132,6 +132,68 @@ export function MetadataButton() {
   );
 }
 
+/**
+ * Apply ONE annotation spanning MULTIPLE blocks.
+ *
+ * `metadata.attach` is single-block in v1, so instead of one anchor we fan the
+ * selection out into its per-block segments and attach one anchor per segment,
+ * all sharing a single `annotationId` (see `useAnnotations.attachAcrossBlocks`).
+ * Group by that id on read to treat the fragments as one logical annotation.
+ */
+export function CrossBlockMetadataButton() {
+  const ui = useSuperDocUI();
+  const selection = useSuperDocSelection();
+  const { attachAcrossBlocks } = useAnnotations();
+  const capturedSelection = useRef<SelectionCapture | null>(null);
+
+  const segments = selection.target?.segments ?? [];
+  const disabled = !ui || selection.empty || segments.length === 0;
+
+  const rememberSelection = () => {
+    const capture = ui?.selection.capture();
+    if (capture) capturedSelection.current = capture;
+  };
+
+  const onClick = () => {
+    if (!ui) return;
+
+    if (capturedSelection.current) {
+      ui.selection.restore(capturedSelection.current);
+      capturedSelection.current = null;
+    }
+
+    const textTarget = selection.target;
+    if (!textTarget || textTarget.segments.length === 0) {
+      alert('Please select some text first.');
+      return;
+    }
+
+    const result = attachAcrossBlocks(textTarget.segments);
+    if ('error' in result) {
+      alert(`Failed to apply cross-block metadata: ${result.error}`);
+    } else {
+      console.log(
+        `[CrossBlockMetadataButton] attached ${result.count} fragment(s) under annotationId ${result.annotationId}`,
+      );
+    }
+  };
+
+  return (
+    <button
+      className="tb-btn metadata-btn"
+      disabled={disabled}
+      title="Apply one annotation across multiple blocks — fans out into one metadata anchor per block, sharing a single id"
+      onMouseDown={(e) => {
+        e.preventDefault();
+        rememberSelection();
+      }}
+      onClick={onClick}
+    >
+      <TagIcon /> Apply Cross-Block Metadata
+    </button>
+  );
+}
+
 interface HighlightToggleProps {
   enabled: boolean;
   onToggle(): void;
