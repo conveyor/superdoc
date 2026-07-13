@@ -40,6 +40,10 @@ function AppInner() {
   const host = useSuperDocHost();
   const room = useLiveblocksRoom(roomId);
 
+  // The running SuperDoc instance reports the resolved library version, so the
+  // page always shows exactly which `superdoc` build is loaded. Null until ready.
+  const superDocVersion = (host as { version?: string } | null)?.version ?? null;
+
   // True whenever a Liveblocks key is configured (connecting or ready).
   const collaborationEnabled = room.status !== 'disabled';
 
@@ -98,6 +102,9 @@ function AppInner() {
       <header className="app-header">
         <h1>Metadata Demo</h1>
         <span className="subtitle">Invisible ranges with metadata</span>
+        <span className="version-badge" title="Loaded superdoc library version">
+          {superDocVersion ? `superdoc v${superDocVersion}` : 'superdoc loading…'}
+        </span>
         <div className="header-actions">
           <button
             className="header-btn"

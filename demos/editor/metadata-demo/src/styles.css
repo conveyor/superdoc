@@ -59,6 +59,16 @@ button {
   color: var(--text-muted);
 }
 
+.version-badge {
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-muted);
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+
 .app-header .header-actions {
   margin-left: auto;
   display: flex;
