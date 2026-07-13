@@ -118,6 +118,15 @@ button {
   height: 100%;
 }
 
+.editor-connecting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted, #64748b);
+  font-size: 14px;
+}
+
 .sidebar {
   background: var(--bg);
   border-left: 1px solid var(--border);

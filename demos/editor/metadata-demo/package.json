@@ -9,10 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@liveblocks/client": "catalog:",
+    "@liveblocks/yjs": "catalog:",
     "@superdoc-dev/react": "workspace:*",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "superdoc": "workspace:*"
+    "superdoc": "workspace:*",
+    "yjs": "catalog:"
   },
   "devDependencies": {
     "@types/react": "catalog:",

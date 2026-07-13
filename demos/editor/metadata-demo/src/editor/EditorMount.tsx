@@ -1,6 +1,8 @@
-import { SuperDocEditor } from '@superdoc-dev/react';
+import { useMemo } from 'react';
+import { SuperDocEditor, type SuperDocModules } from '@superdoc-dev/react';
 import '@superdoc-dev/react/style.css';
 import { useSetSuperDoc } from 'superdoc/ui/react';
+import type { Collaboration } from './useLiveblocksRoom';
 
 const CURRENT_USER = { name: 'Alex Rivera', email: 'alex@example.com' };
 
@@ -33,6 +35,12 @@ const TELEMETRY = { enabled: false as const };
 
 interface EditorMountProps {
   document?: string | File;
+  /**
+   * When present, routes the editor through a shared Yjs document so edits
+   * (and metadata anchors) replicate to other clients in the same room. Omit
+   * to run the editor standalone. See {@link useLiveblocksRoom}.
+   */
+  collaboration?: Collaboration;
 }
 
 /**
@@ -46,15 +54,40 @@ interface EditorMountProps {
  * three-pane app layout instead of taking over the page. `style={{
  * height: '100%' }}` is part of that posture.
  */
-export function EditorMount({ document: documentSource = '/sample-review.docx' }: EditorMountProps) {
+export function EditorMount({ document: documentSource = '/sample-review.docx', collaboration }: EditorMountProps) {
   const setSuperDoc = useSetSuperDoc();
+
+  // `<SuperDocEditor>` rebuilds when the `modules` reference changes, so fold
+  // collaboration in once and keep it stable. SuperDoc reads
+  // `modules.collaboration = { ydoc, provider }`. The cast bridges a narrower
+  // awareness generic in SuperDoc's provider type vs `LiveblocksYjsProvider`.
+  const modules = useMemo<SuperDocModules>(() => {
+    if (!collaboration) return MODULES;
+    return { ...MODULES, collaboration } as SuperDocModules;
+  }, [collaboration]);
+
+  // In collaboration mode SuperDoc treats the Yjs doc as the source of truth and,
+  // unless the document is flagged `isNewFile`, assumes the room was seeded
+  // elsewhere (e.g. a backend) — so it drops the `.docx` and renders the empty
+  // room blank. This demo has no backend, so it flags `isNewFile: true` to seed
+  // the room from the file. It's safe to always set: SuperDoc only seeds an empty
+  // room (`isNewFile && !ydocHasContent`), so later joiners inherit instead.
+  const documentConfig = useMemo(() => {
+    if (!collaboration) {
+      return documentSource;
+    }
+    if (typeof documentSource === 'string') {
+      return { url: documentSource, type: 'docx', isNewFile: true };
+    }
+    return { data: documentSource, type: 'docx', name: documentSource.name, isNewFile: true };
+  }, [documentSource, collaboration]);
 
   return (
     <SuperDocEditor
-      document={documentSource}
+      document={documentConfig}
       documentMode="editing"
       user={CURRENT_USER}
-      modules={MODULES}
+      modules={modules}
       telemetry={TELEMETRY}
       hideToolbar
       contained

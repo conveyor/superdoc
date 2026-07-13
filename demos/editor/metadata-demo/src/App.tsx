@@ -1,9 +1,27 @@
 import { useState, useRef, useCallback } from 'react';
 import { SuperDocUIProvider, useSuperDocHost } from 'superdoc/ui/react';
 import { EditorMount } from './editor/EditorMount';
+import { useLiveblocksRoom } from './editor/useLiveblocksRoom';
 import { Toolbar, MetadataButton, CrossBlockMetadataButton, HighlightToggle } from './components/Toolbar';
 import { MetadataPanel } from './components/MetadataPanel';
 import { MetadataHighlights } from './components/MetadataHighlights';
+
+// The room id lives in the URL (`?room=<id>`) so every tab on the same URL
+// shares one Yjs document. No `?room=` param lands on this default room.
+const DEFAULT_ROOM_ID = 'metadata-demo-room';
+
+/** Read the room id from `?room=` on load, falling back to the default. */
+function getInitialRoomId(): string {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('room') ?? DEFAULT_ROOM_ID;
+}
+
+/** Reflect the active room id into the URL without a page reload. */
+function writeRoomIdToUrl(roomId: string): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set('room', roomId);
+  window.history.replaceState(null, '', url);
+}
 
 export function App() {
   return (
@@ -17,22 +35,40 @@ function AppInner() {
   const [highlightEnabled, setHighlightEnabled] = useState(false);
   const [documentSource, setDocumentSource] = useState<string | File>('/sample-review.docx');
   const [editorKey, setEditorKey] = useState(0);
+  const [roomId, setRoomId] = useState<string>(getInitialRoomId);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const host = useSuperDocHost();
+  const room = useLiveblocksRoom(roomId);
+
+  // True whenever a Liveblocks key is configured (connecting or ready).
+  const collaborationEnabled = room.status !== 'disabled';
 
   const handleImport = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
 
-  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setDocumentSource(file);
-      setEditorKey((k) => k + 1); // force remount
-    }
-    // Reset input so same file can be re-selected
-    e.target.value = '';
-  }, []);
+  const handleFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        setDocumentSource(file);
+
+        if (collaborationEnabled) {
+          // A room only seeds from `document` while its Yjs doc is empty, so the
+          // imported file needs a fresh room. The URL updates to it; open that
+          // URL in another tab to collaborate on the imported file.
+          const freshRoomId = `metadata-demo-${crypto.randomUUID().slice(0, 8)}`;
+          writeRoomIdToUrl(freshRoomId);
+          setRoomId(freshRoomId);
+        } else {
+          setEditorKey((k) => k + 1); // force remount to load the new file
+        }
+      }
+      // Reset input so the same file can be re-selected
+      e.target.value = '';
+    },
+    [collaborationEnabled],
+  );
 
   const handleExport = useCallback(async () => {
     const superdoc = host as { activeEditor?: { exportDocx?: () => Promise<ArrayBuffer> } } | null;
@@ -63,7 +99,15 @@ function AppInner() {
         <h1>Metadata Demo</h1>
         <span className="subtitle">Invisible ranges with metadata</span>
         <div className="header-actions">
-          <button className="header-btn" onClick={handleImport}>
+          <button
+            className="header-btn"
+            onClick={handleImport}
+            title={
+              collaborationEnabled
+                ? 'Import a .docx into a new collaboration room'
+                : 'Import a .docx'
+            }
+          >
             <UploadIcon /> Import
           </button>
           <button className="header-btn" onClick={handleExport}>
@@ -86,7 +130,18 @@ function AppInner() {
           </div>
           <div className="editor-shell">
             <div className="editor-canvas">
-              <EditorMount key={editorKey} document={documentSource} />
+              {/* Hold the editor back until the room has synced, so the shared
+                  Yjs doc (not a per-tab copy) drives the initial content. The
+                  key remounts on room change (Import) or standalone file load. */}
+              {room.status === 'connecting' ? (
+                <div className="editor-connecting">Connecting to collaboration room…</div>
+              ) : (
+                <EditorMount
+                  key={`${roomId}-${editorKey}`}
+                  document={documentSource}
+                  collaboration={room.status === 'ready' ? room.collaboration : undefined}
+                />
+              )}
             </div>
           </div>
           {highlightEnabled && <MetadataHighlights />}
