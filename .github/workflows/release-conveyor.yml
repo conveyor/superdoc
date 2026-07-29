@@ -1,0 +1,47 @@
+# Publish the Conveyor fork of SuperDoc to npm as @conveyorhq/superdoc.
+#
+# This needs a one-time setup before it can run (see CONVEYOR.md):
+#   1. On npmjs.com, configure a "trusted publisher" for @conveyorhq/superdoc
+#      pointing at this repo + this workflow file (enables OIDC, no npm token).
+#   2. Confirm the runner's npm CLI is recent enough for OIDC (>= 11.5.1).
+#
+# Trigger it from the GitHub Actions tab ("Run workflow"). Leave the version
+# blank to auto-pick the next -conveyor.N, or type an exact fork version.
+name: Publish Conveyor fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact fork version (blank = auto next -conveyor.N)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write # required for npm OIDC trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing (OIDC) needs a recent npm CLI.
+      - name: Ensure npm supports OIDC
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Reuse the same script devs run locally, non-interactively (--yes).
+      # No NPM_TOKEN: auth is via the OIDC id-token granted above.
+      - name: Build & publish
+        run: bash scripts/conveyor/publish-fork.sh --yes "${{ inputs.version }}"
