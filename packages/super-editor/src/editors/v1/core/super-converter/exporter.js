@@ -85,19 +85,58 @@ export const ensureSectionLayoutDefaults = (sectPr, converter) => {
     return child;
   };
 
+  // Part 1: make sure the page has a width and height.
+  //
+  // A section can carry its own page size and margins — Word supports
+  // per-section page geometry (e.g. one landscape page inside an otherwise
+  // portrait document). `converter.pageStyles` is only a single, document-level
+  // fallback. So the section's OWN w:pgSz / w:pgMar must win — we only reach for
+  // the document-level values, then the hard defaults, to fill in what the
+  // section itself doesn't specify. After this block w:w / w:h are guaranteed set.
   const pageSize = converter?.pageStyles?.pageSize;
   const pgSz = ensureChild('w:pgSz');
-  if (pageSize?.width != null) pgSz.attributes['w:w'] = String(inchesToTwips(pageSize.width));
-  if (pageSize?.height != null) pgSz.attributes['w:h'] = String(inchesToTwips(pageSize.height));
+  if (pgSz.attributes['w:w'] == null && pageSize?.width != null) {
+    pgSz.attributes['w:w'] = String(inchesToTwips(pageSize.width));
+  }
+  if (pgSz.attributes['w:h'] == null && pageSize?.height != null) {
+    pgSz.attributes['w:h'] = String(inchesToTwips(pageSize.height));
+  }
   if (pgSz.attributes['w:w'] == null) pgSz.attributes['w:w'] = DEFAULT_SECTION_PROPS_TWIPS.pageSize.width;
   if (pgSz.attributes['w:h'] == null) pgSz.attributes['w:h'] = DEFAULT_SECTION_PROPS_TWIPS.pageSize.height;
+
+  // Part 2: make the size we just set agree with the orientation flag.
+  //
+  // Read the existing `w:orient` flag and fix the size if the two disagree.
+  //
+  // How the mismatch arises: the section declared an orientation but no size of
+  // its own — e.g. `<w:pgSz w:orient="landscape"/>` with no w:w / w:h, which is
+  // valid Word (the section inherits its size from elsewhere). There was never a
+  // correct-but-misordered size to swap; Section 1 simply invented portrait-shaped
+  // numbers to fill the hole, because both fallback sources (the hard default and
+  // the document-level size) are portrait and neither knows about this section's
+  // orientation (the contradiction is one we introduced, not one from the file).
+  //
+  // Fix: when the flag says landscape but the dimensions came out portrait-shaped,
+  // swap w:w and w:h so the numbers match the flag. We trust the flag (explicit
+  // authored intent) and repair the geometry (which we introduced via fallback).
+  if (pgSz.attributes['w:orient'] === 'landscape') {
+    const width = Number(pgSz.attributes['w:w']);
+    const height = Number(pgSz.attributes['w:h']);
+    if (Number.isFinite(width) && Number.isFinite(height) && height > width) {
+      pgSz.attributes['w:w'] = String(height);
+      pgSz.attributes['w:h'] = String(width);
+    }
+  }
 
   const pageMargins = converter?.pageStyles?.pageMargins;
   const pgMar = ensureChild('w:pgMar');
   if (pageMargins) {
     Object.entries(pageMargins).forEach(([key, value]) => {
+      const attrKey = `w:${key}`;
+      // Keep the section's own margin; only fill what it didn't specify.
+      if (pgMar.attributes[attrKey] != null) return;
       const converted = inchesToTwips(value);
-      if (converted != null) pgMar.attributes[`w:${key}`] = String(converted);
+      if (converted != null) pgMar.attributes[attrKey] = String(converted);
     });
   }
   Object.entries(DEFAULT_SECTION_PROPS_TWIPS.pageMargins).forEach(([key, value]) => {

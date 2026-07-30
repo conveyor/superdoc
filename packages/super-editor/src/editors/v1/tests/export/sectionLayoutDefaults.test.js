@@ -76,4 +76,71 @@ describe('ensureSectionLayoutDefaults', () => {
     expect(pgMar.attributes['w:left']).toBe(DEFAULT_MARGINS['w:left']);
     expect(pgMar.attributes['w:right']).toBe(DEFAULT_MARGINS['w:right']);
   });
+
+  // Word allows per-section page geometry (e.g. a single landscape page). The
+  // document-level pageStyles is only a fallback derived from the body section
+  // on import, so a section that carries its own size/margins must keep them —
+  // otherwise a landscape section collapses to the portrait document default.
+  it("keeps the section's own page size and margins over document-level pageStyles", () => {
+    const sectPr = {
+      name: 'w:sectPr',
+      elements: [
+        // A4 landscape, in twips: width > height.
+        { name: 'w:pgSz', attributes: { 'w:w': '16838', 'w:h': '11906', 'w:orient': 'landscape' } },
+        { name: 'w:pgMar', attributes: { 'w:top': '1247', 'w:left': '1021' } },
+      ],
+    };
+    const converter = {
+      pageStyles: {
+        // Portrait Letter — the (different) document-level fallback.
+        pageSize: { width: 8.5, height: 11 },
+        pageMargins: { top: 1, left: 1 },
+      },
+    };
+
+    const result = ensureSectionLayoutDefaults(sectPr, converter);
+
+    const pgSz = getElement(result, 'w:pgSz');
+    expect(pgSz.attributes['w:w']).toBe('16838');
+    expect(pgSz.attributes['w:h']).toBe('11906');
+    expect(pgSz.attributes['w:orient']).toBe('landscape');
+
+    const pgMar = getElement(result, 'w:pgMar');
+    expect(pgMar.attributes['w:top']).toBe('1247');
+    expect(pgMar.attributes['w:left']).toBe('1021');
+  });
+
+  // Word renders orientation from the w:w/w:h ratio, so a landscape flag paired
+  // with portrait dimensions renders portrait. When we have to fall back to the
+  // portrait default for a section that only declared its orientation, swap the
+  // dimensions so the flag and the page actually agree.
+  it('swaps fallback dimensions to landscape when the section is landscape but sized portrait', () => {
+    const sectPr = {
+      name: 'w:sectPr',
+      // Only the orientation survived; width/height are missing and fall back to
+      // the portrait default (12240 x 15840).
+      elements: [{ name: 'w:pgSz', attributes: { 'w:orient': 'landscape' } }],
+    };
+
+    const result = ensureSectionLayoutDefaults(sectPr, {});
+
+    const pgSz = getElement(result, 'w:pgSz');
+    // Default portrait 12240 x 15840 → swapped to landscape 15840 x 12240.
+    expect(pgSz.attributes['w:w']).toBe(DEFAULT_HEIGHT);
+    expect(pgSz.attributes['w:h']).toBe(DEFAULT_WIDTH);
+    expect(pgSz.attributes['w:orient']).toBe('landscape');
+  });
+
+  it('leaves already-consistent landscape dimensions untouched', () => {
+    const sectPr = {
+      name: 'w:sectPr',
+      elements: [{ name: 'w:pgSz', attributes: { 'w:w': '15840', 'w:h': '12240', 'w:orient': 'landscape' } }],
+    };
+
+    const result = ensureSectionLayoutDefaults(sectPr, {});
+
+    const pgSz = getElement(result, 'w:pgSz');
+    expect(pgSz.attributes['w:w']).toBe('15840');
+    expect(pgSz.attributes['w:h']).toBe('12240');
+  });
 });
