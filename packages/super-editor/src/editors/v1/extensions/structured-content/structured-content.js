@@ -3,6 +3,7 @@ import { Attribute } from '@core/Attribute.js';
 import { StructuredContentInlineView } from './StructuredContentInlineView.js';
 import { createStructuredContentLockPlugin } from './structured-content-lock-plugin.js';
 import { createStructuredContentSelectPlugin } from './structured-content-select-plugin.js';
+import { createAtomicControlsSelectPlugin } from './atomic-controls-select-plugin.js';
 
 export const structuredContentClass = 'sd-structured-content';
 export const structuredContentInnerClass = 'sd-structured-content__content';
@@ -145,7 +146,14 @@ export const StructuredContent = Node.create({
   },
 
   addPmPlugins() {
-    return [createStructuredContentLockPlugin(), createStructuredContentSelectPlugin(this.editor)];
+    // Order matters: the select plugin runs its arrow-exit / boundary logic
+    // first, then the atomic-controls plugin snaps any caret that still lands
+    // inside a checkbox / dropdown control back outside the wrapper.
+    return [
+      createStructuredContentLockPlugin(),
+      createStructuredContentSelectPlugin(this.editor),
+      createAtomicControlsSelectPlugin(this.editor),
+    ];
   },
 
   addNodeView() {
