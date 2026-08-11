@@ -109,20 +109,57 @@ function getDefaultLvlText(fmt, level, markerText) {
 }
 
 /**
- * Finds the first list that needs flattening:
+ * Finds the next list to flatten: always the OUTERMOST list that is NOT itself
+ * nested inside an <li>. Among those candidates it prefers, in order:
  * 1. Lists without data-list-id (completely unprocessed)
  * 2. Lists with more than one <li> child
  * 3. Lists with nested lists inside them
+ * 4. Single-item lists that still carry list metadata
+ *
+ * Example:
+ *     1. A
+ *        a. B
+ *           • C
+ *
+ * Each pass peels the OUTERMOST list into one flat
+ * paragraph per item — written "[text]@level" below — and HOISTS whatever list
+ * was nested inside up to the top level:
+ *
+ *   Pass 1  peel "1. A" (the only list not tucked inside an item):
+ *             [A]@0
+ *             a. B            ← its sub-list is now top-level
+ *                • C
+ *   Pass 2  peel "a. B" (now top-level):
+ *             [A]@0
+ *             [B]@1
+ *             • C             ← the bullet list is now top-level
+ *   Pass 3  peel "• C":
+ *             [A]@0  [B]@1  [C]@2
  */
 function findListToFlatten(doc) {
-  // First priority: unprocessed lists
-  let list = doc.querySelector('ol:not([data-list-id]), ul:not([data-list-id])');
-  if (list) return list;
+  // Walk up from a list; a list sitting inside an <li> belongs to a parent list
+  // that hasn't been flattened yet, so it isn't a candidate on its own.
+  const isNestedInsideListItem = (list) => {
+    let ancestor = list.parentElement;
+    while (ancestor && ancestor !== doc.body) {
+      if (ancestor.tagName?.toLowerCase() === 'li') {
+        return true;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    return false;
+  };
 
-  // Second priority: lists with multiple items
-  const allLists = doc.querySelectorAll('ol[data-list-id], ul[data-list-id]');
-  for (const list of allLists) {
+  const eligibleLists = Array.from(doc.querySelectorAll('ol, ul')).filter((list) => !isNestedInsideListItem(list));
+
+  // First priority: unprocessed lists
+  const unprocessed = eligibleLists.find((list) => !list.hasAttribute('data-list-id'));
+  if (unprocessed) return unprocessed;
+
+  for (const list of eligibleLists) {
     const liChildren = Array.from(list.children).filter((c) => c.tagName.toLowerCase() === 'li');
+
+    // Second priority: lists with multiple items
     if (liChildren.length > 1) {
       return list;
     }
@@ -183,8 +220,13 @@ function flattenFoundList(listElem, editor) {
   const newLists = [];
 
   items.forEach((li) => {
-    // Extract any nested lists first
-    const nestedLists = Array.from(li.querySelectorAll('ol, ul'));
+    // Extract this item's own nested lists. Only DIRECT-child lists — a
+    // descendant query would also match lists nested inside those,
+    // duplicating their items. Each level is flattened on its own pass.
+    const nestedLists = Array.from(li.children).filter((child) => {
+      const childTag = child.tagName?.toLowerCase();
+      return childTag === 'ol' || childTag === 'ul';
+    });
     const nestedListsData = nestedLists.map((nl) => ({
       element: nl.cloneNode(true),
       parent: nl.parentNode,
