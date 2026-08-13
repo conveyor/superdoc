@@ -131,6 +131,65 @@ describe('splitAnchoredMetadataAt', () => {
     expect(anchors[1].attrs.id).not.toBe('111');
   });
 
+  // A cursor sitting exactly at the anchor's first or last position must not be
+  // split *through*, or one half would be an empty zero-width anchor that
+  // survives export/re-import and can't be selected or deleted. At a boundary we
+  // split the block outside the anchor, keeping it whole on one side.
+
+  it('at the anchor start, keeps a single anchor and adds an empty block before it', () => {
+    const { handled, next } = applyCommand(stateWithCursorInAnchor({ cursorInInside: 0 }));
+
+    expect(handled).toBe(true);
+    expect(next.doc.childCount).toBe(2);
+
+    const anchors = anchorsIn(next.doc);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].textContent).toBe('highlighted');
+    expect(anchors[0].attrs.id).toBe('111');
+
+    // The anchor (with all its content) moved into the trailing block; the caret
+    // rides down with it and sits at the anchor's start.
+    expect(next.doc.child(0).textContent).toBe('before ');
+    expect(next.doc.child(1).textContent).toBe('highlighted after');
+
+    const { $from } = next.selection;
+    expect($from.parent.type.name).toBe('structuredContent');
+    expect($from.parentOffset).toBe(0);
+  });
+
+  it('at the anchor end, keeps a single anchor and drops the caret into a new block after it', () => {
+    const { handled, next } = applyCommand(stateWithCursorInAnchor({ cursorInInside: 'highlighted'.length }));
+
+    expect(handled).toBe(true);
+    expect(next.doc.childCount).toBe(2);
+
+    const anchors = anchorsIn(next.doc);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].textContent).toBe('highlighted');
+    expect(anchors[0].attrs.id).toBe('111');
+
+    // The anchor stays whole in the leading block; the caret lands at the start
+    // of the new trailing block.
+    expect(next.doc.child(0).textContent).toBe('before highlighted');
+    expect(next.doc.child(1).textContent).toBe(' after');
+
+    const { $from } = next.selection;
+    expect($from.parent.type.name).toBe('paragraph');
+    expect($from.parentOffset).toBe(0);
+  });
+
+  it('never leaves an empty anchor even after repeated Enter at the anchor start', () => {
+    let state = stateWithCursorInAnchor({ cursorInInside: 0 });
+    for (let press = 0; press < 3; press += 1) {
+      state = applyCommand(state).next;
+    }
+
+    const anchors = anchorsIn(state.doc);
+    expect(anchors).toHaveLength(1);
+    expect(anchors.every((anchor) => anchor.content.size > 0)).toBe(true);
+    expect(anchors[0].textContent).toBe('highlighted');
+  });
+
   it('is a no-op with no dispatch but still reports it would handle Enter', () => {
     const state = stateWithCursorInAnchor();
     const handled = splitAnchoredMetadataAt(state, undefined);
