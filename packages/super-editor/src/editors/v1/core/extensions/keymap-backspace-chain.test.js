@@ -52,6 +52,7 @@ describe('handleBackspace chain ordering', () => {
       removeNumberingProperties: make('removeNumberingProperties'),
       joinBackward: make('joinBackward'),
       selectNodeBackward: make('selectNodeBackward'),
+      backspaceAtIsolatingInlineSdtBoundary: make('backspaceAtIsolatingInlineSdtBoundary'),
     };
 
     const editor = {
@@ -93,6 +94,9 @@ describe('handleBackspace chain ordering', () => {
       'removeNumberingProperties',
       'joinBackward',
       'selectNodeBackward',
+      // Final fallback: consume Backspace at an isolating inline-SDT boundary so
+      // native contentEditable cannot corrupt the surrounding structure.
+      'backspaceAtIsolatingInlineSdtBoundary',
     ]);
   });
 
