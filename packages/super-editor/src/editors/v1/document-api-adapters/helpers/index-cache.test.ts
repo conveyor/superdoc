@@ -1,6 +1,6 @@
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import type { Editor } from '../../core/Editor.js';
-import { getBlockIndex, getInlineIndex } from './index-cache.js';
+import { getBlockIndex, getInlineIndex, getSdtIndex } from './index-cache.js';
 
 function createTextNode(text: string): ProseMirrorNode {
   return {
@@ -45,6 +45,46 @@ function createParagraphNode(nodeId: string, text = 'Hello'): ProseMirrorNode {
     },
     forEach(callback: (node: ProseMirrorNode, offset: number) => void) {
       callback(textNode, 0);
+    },
+  } as unknown as ProseMirrorNode;
+}
+
+/**
+ * Minimal inline SDT (content-control) node stub. Only the fields the SDT
+ * index reads are populated: `type.name` (to classify block vs inline) and
+ * `attrs` (to bucket by `tag`).
+ */
+function createInlineSdtNode(id: string, tag: string | undefined): ProseMirrorNode {
+  return {
+    type: { name: 'structuredContent' },
+    attrs: { id, tag },
+    marks: [],
+    nodeSize: 2,
+    content: { size: 0 },
+    isText: false,
+    isInline: true,
+    isBlock: false,
+    isLeaf: false,
+    childCount: 0,
+    forEach() {
+      // No inner content needed for these tests.
+    },
+  } as unknown as ProseMirrorNode;
+}
+
+/** A doc whose `descendants` walk yields the given SDT nodes in order at pos 0,1,2,... */
+function createDocWithSdts(sdtNodes: ProseMirrorNode[]): ProseMirrorNode {
+  return {
+    type: { name: 'doc' },
+    attrs: {},
+    marks: [],
+    nodeSize: sdtNodes.length + 2,
+    content: { size: sdtNodes.length },
+    isBlock: false,
+    isLeaf: false,
+    childCount: sdtNodes.length,
+    descendants(callback: (node: ProseMirrorNode, pos: number) => void) {
+      sdtNodes.forEach((node, index) => callback(node, index));
     },
   } as unknown as ProseMirrorNode;
 }
@@ -118,5 +158,47 @@ describe('index-cache', () => {
 
     expect(secondBlock).not.toBe(firstBlock);
     expect(secondInline).not.toBe(firstInline);
+  });
+
+  it('builds an SDT index with all nodes in document order and grouped by tag', () => {
+    // Two anchors share tag "dup" — byTag must keep BOTH (no dedupe) so callers
+    // can detect duplicates. One SDT has no tag and must not appear in byTag.
+    const editor = makeEditor(
+      createDocWithSdts([
+        createInlineSdtNode('1', 'alpha'),
+        createInlineSdtNode('2', 'dup'),
+        createInlineSdtNode('3', 'dup'),
+        createInlineSdtNode('4', undefined),
+      ]),
+    );
+
+    const index = getSdtIndex(editor);
+
+    expect(index.all.map((sdt) => sdt.node.attrs.id)).toEqual(['1', '2', '3', '4']);
+    expect(index.byTag.get('alpha')?.map((sdt) => sdt.node.attrs.id)).toEqual(['1']);
+    expect(index.byTag.get('dup')?.map((sdt) => sdt.node.attrs.id)).toEqual(['2', '3']);
+    expect(index.byTag.has('4')).toBe(false);
+  });
+
+  it('lazily builds and reuses the SDT index for the same document snapshot', () => {
+    const editor = makeEditor(createDocWithSdts([createInlineSdtNode('1', 'alpha')]));
+
+    const first = getSdtIndex(editor);
+    const second = getSdtIndex(editor);
+
+    expect(second).toBe(first);
+  });
+
+  it('rebuilds the SDT index when the document snapshot changes', () => {
+    const firstDoc = createDocWithSdts([createInlineSdtNode('1', 'alpha')]);
+    const secondDoc = createDocWithSdts([createInlineSdtNode('2', 'beta')]);
+    const editor = makeEditor(firstDoc) as Editor & { state: { doc: ProseMirrorNode } };
+
+    const first = getSdtIndex(editor);
+    editor.state.doc = secondDoc;
+    const second = getSdtIndex(editor);
+
+    expect(second).not.toBe(first);
+    expect(second.all.map((sdt) => sdt.node.attrs.tag)).toEqual(['beta']);
   });
 });

@@ -31,13 +31,13 @@ import {
   removeCustomXmlPart,
 } from '../../core/super-converter/custom-xml-parts.js';
 import { DocumentApiAdapterError } from '../errors.js';
-import { getBlockIndex, clearIndexCache } from '../helpers/index-cache.js';
+import { getBlockIndex, getSdtIndex, clearIndexCache } from '../helpers/index-cache.js';
 import { isTextBlockCandidate } from '../helpers/node-address-resolver.js';
 import { resolveSelectionTarget } from '../helpers/selection-target-resolver.js';
 import { pmPositionToTextOffset } from '../helpers/text-offset-resolver.js';
 import { rejectTrackedMode } from '../helpers/mutation-helpers.js';
 import { paginate } from '../helpers/adapter-utils.js';
-import { findAllSdtNodes, SDT_INLINE_NAME } from '../helpers/content-controls/index.js';
+import { SDT_INLINE_NAME } from '../helpers/content-controls/index.js';
 import { executeOutOfBandMutation } from '../out-of-band-mutation.js';
 import { executeDomainCommand } from './plan-wrappers.js';
 import { checkRevision, getRevision } from './revision-tracker.js';
@@ -237,7 +237,12 @@ function dispatchTransaction(editor: Editor, tr: Editor['state']['tr']): void {
 }
 
 function findAnchorsById(editor: Editor, id: string) {
-  return findAllSdtNodes(editor.state.doc).filter((sdt) => sdt.kind === 'inline' && sdt.node.attrs?.tag === id);
+  // Same result as walking the whole doc and filtering by (inline + tag===id),
+  // but served from the cached SDT index keyed on the current doc snapshot.
+  // `byTag` groups by `attrs.tag`, so `.get(id)` is exactly the tag match;
+  // we only narrow it to inline anchors here.
+  const taggedSdts = getSdtIndex(editor).byTag.get(id) ?? [];
+  return taggedSdts.filter((sdt) => sdt.kind === 'inline');
 }
 
 function hasAnchor(editor: Editor, id: string): boolean {
@@ -359,7 +364,7 @@ function isMetadataAnchorNode(metadataIds: ReadonlySet<string>, node: ProseMirro
 function findOverlappingMetadataAnchor(editor: Editor, absFrom: number, absTo: number) {
   const convertedXml = getConvertedXml(editor);
   const metadataIds = new Set(listMetadataParts(convertedXml).flatMap((part) => part.entries.map((entry) => entry.id)));
-  return findAllSdtNodes(editor.state.doc).find((sdt) => {
+  return getSdtIndex(editor).all.find((sdt) => {
     if (sdt.kind !== 'inline') return false;
     if (!isMetadataAnchorNode(metadataIds, sdt.node)) return false;
     const anchorFrom = sdt.pos + 1;
@@ -376,13 +381,20 @@ function assertNoOverlappingMetadataAnchor(editor: Editor, absFrom: number, absT
   throw new DocumentApiAdapterError('INVALID_TARGET', 'metadata.attach does not support overlapping metadata anchors.');
 }
 
-function anchorOverlaps(editor: Editor, id: string, within: SelectionTarget): boolean {
+/**
+ * Does anchor `id` overlap the absolute range `[absFrom, absTo]`?
+ *
+ * Takes an ALREADY-resolved range, not a `SelectionTarget`, so a caller that
+ * tests many anchors against the same `within` scope resolves that scope once
+ * instead of per anchor. (otherwise (`list({ within })` on a doc with N anchors would
+ * re-run `resolveSelectionTarget(within)` N times)
+ */
+function anchorOverlapsRange(editor: Editor, id: string, range: { absFrom: number; absTo: number }): boolean {
   const anchor = findAnchorsById(editor, id)[0];
   if (!anchor) return false;
-  const query = resolveSelectionTarget(editor, within);
   const anchorFrom = anchor.pos + 1;
   const anchorTo = anchor.pos + anchor.node.nodeSize - 1;
-  return rangesOverlap(anchorFrom, anchorTo, query.absFrom, query.absTo);
+  return rangesOverlap(anchorFrom, anchorTo, range.absFrom, range.absTo);
 }
 
 function writeEntry(
@@ -489,7 +501,12 @@ function listEntries(editor: Editor, query?: AnchoredMetadataListInput): Metadat
     entries = entries.filter((entry) => entry.namespace === query.namespace);
   }
   if (query?.within !== undefined) {
-    entries = entries.filter((entry) => anchorOverlaps(editor, entry.id, query.within as SelectionTarget));
+    // Resolve the `within` scope ONCE, then test each anchor against that fixed
+    // range — not once per anchor. On a doc with many anchors this is the
+    // difference between one `resolveSelectionTarget` and N identical ones, and
+    // it runs on every selection change.
+    const withinRange = resolveSelectionTarget(editor, query.within as SelectionTarget);
+    entries = entries.filter((entry) => anchorOverlapsRange(editor, entry.id, withinRange));
   }
   if (query?.resolvedOnly) {
     entries = entries.filter((entry) => hasAnchor(editor, entry.id));

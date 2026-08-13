@@ -55,10 +55,22 @@ export function findAllSdtNodes(doc: ProseMirrorNode): ResolvedSdt[] {
 /**
  * Resolve exactly one SDT node by its target. Throws TARGET_NOT_FOUND if
  * missing or AMBIGUOUS_TARGET if multiple nodes share the same id.
+ *
+ * @param doc - The document to resolve against.
+ * @param target - The content-control target (carries the `nodeId` to match).
+ * @param sdtNodes - Optional pre-walked list of every SDT in `doc` (e.g. the
+ *   cached SDT index's `all`). When omitted we fall back to a fresh full-doc
+ *   walk. Passing the cached list avoids re-walking on the typing hot path;
+ *   callers MUST only pass a list built from the SAME `doc` snapshot so the
+ *   ambiguity check (multiple ids) stays exact.
  */
-export function resolveSdtByTarget(doc: ProseMirrorNode, target: ContentControlTarget): ResolvedSdt {
+export function resolveSdtByTarget(
+  doc: ProseMirrorNode,
+  target: ContentControlTarget,
+  sdtNodes?: ResolvedSdt[],
+): ResolvedSdt {
   const nodeId = target.nodeId;
-  const all = findAllSdtNodes(doc);
+  const all = sdtNodes ?? findAllSdtNodes(doc);
   const matches = all.filter((sdt) => String(sdt.node.attrs.id) === nodeId);
 
   if (matches.length === 0) {
