@@ -4,6 +4,7 @@ import { StructuredContentInlineView } from './StructuredContentInlineView.js';
 import { createStructuredContentLockPlugin } from './structured-content-lock-plugin.js';
 import { createStructuredContentSelectPlugin } from './structured-content-select-plugin.js';
 import { createAtomicControlsSelectPlugin } from './atomic-controls-select-plugin.js';
+import { createStructuredContentSplitPlugin } from './structured-content-split-plugin.js';
 
 export const structuredContentClass = 'sd-structured-content';
 export const structuredContentInnerClass = 'sd-structured-content__content';
@@ -146,10 +147,13 @@ export const StructuredContent = Node.create({
   },
 
   addPmPlugins() {
-    // Order matters: the select plugin runs its arrow-exit / boundary logic
-    // first, then the atomic-controls plugin snaps any caret that still lands
-    // inside a checkbox / dropdown control back outside the wrapper.
+    // Order matters: the split plugin claims a plain Enter inside a highlight
+    // before the default binding treats it as a no-op; the select plugin then
+    // runs its arrow-exit / boundary logic, and the atomic-controls plugin snaps
+    // any caret that still lands inside a checkbox / dropdown control back
+    // outside the wrapper.
     return [
+      createStructuredContentSplitPlugin(),
       createStructuredContentLockPlugin(),
       createStructuredContentSelectPlugin(this.editor),
       createAtomicControlsSelectPlugin(this.editor),
