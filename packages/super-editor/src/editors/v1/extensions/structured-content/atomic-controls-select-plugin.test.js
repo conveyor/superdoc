@@ -86,8 +86,8 @@ describe('AtomicControlsSelectPlugin', () => {
    *
    * @returns {boolean} whether a handler claimed the key.
    */
-  function pressArrow(key) {
-    const event = new KeyboardEvent('keydown', { key, bubbles: true });
+  function pressArrow(key, { shift = false } = {}) {
+    const event = new KeyboardEvent('keydown', { key, shiftKey: shift, bubbles: true });
     let handled = false;
     editor.view.someProp('handleKeyDown', (handler) => {
       handled = handler(editor.view, event);
@@ -121,6 +121,55 @@ describe('AtomicControlsSelectPlugin', () => {
       expect(editor.state.selection.empty).toBe(true);
       expect(selectionIsInsideStructuredContent(editor.state.selection)).toBe(false);
       expect(editor.state.selection.from).toBe(sdt.pos);
+    });
+
+    it('Shift+ArrowLeft from just AFTER an inline checkbox extends the selection across it', () => {
+      const sdt = buildInlineControlDoc('checkbox');
+      expect(sdt).not.toBeNull();
+
+      // Caret parked on the trailing boundary, as if the user just Shift-selected
+      // leftward through the following text and reached the checkbox.
+      setCaret(sdt.pos + sdt.node.nodeSize);
+      const handled = pressArrow('ArrowLeft', { shift: true });
+
+      expect(handled).toBe(true);
+      // The highlight grows across the control instead of stalling: the anchor
+      // stays on the trailing edge and the head jumps to the leading edge.
+      expect(editor.state.selection.empty).toBe(false);
+      expect(editor.state.selection.anchor).toBe(sdt.pos + sdt.node.nodeSize);
+      expect(editor.state.selection.head).toBe(sdt.pos);
+    });
+
+    it('Shift+ArrowRight from just BEFORE an inline checkbox extends the selection across it', () => {
+      const sdt = buildInlineControlDoc('checkbox');
+      expect(sdt).not.toBeNull();
+
+      setCaret(sdt.pos); // caret parked on the leading boundary
+      const handled = pressArrow('ArrowRight', { shift: true });
+
+      expect(handled).toBe(true);
+      expect(editor.state.selection.empty).toBe(false);
+      expect(editor.state.selection.anchor).toBe(sdt.pos);
+      expect(editor.state.selection.head).toBe(sdt.pos + sdt.node.nodeSize);
+    });
+
+    it('Shift+ArrowLeft keeps an existing anchor when extending across the control', () => {
+      const sdt = buildInlineControlDoc('checkbox');
+      expect(sdt).not.toBeNull();
+
+      // Start with a range already covering the trailing text: anchor after " Z",
+      // head parked on the control's trailing boundary — the exact spot the user
+      // reaches by Shift-selecting leftward until the highlight hits the checkbox.
+      const anchor = sdt.pos + sdt.node.nodeSize + 2;
+      const head = sdt.pos + sdt.node.nodeSize;
+      editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, anchor, head)));
+
+      const handled = pressArrow('ArrowLeft', { shift: true });
+
+      expect(handled).toBe(true);
+      // Anchor is untouched; only the head crosses to the leading edge.
+      expect(editor.state.selection.anchor).toBe(anchor);
+      expect(editor.state.selection.head).toBe(sdt.pos);
     });
 
     it('steps over a trailing editable-slot char when hopping right past the control', () => {
@@ -195,19 +244,23 @@ describe('AtomicControlsSelectPlugin', () => {
       expect(editor.state.selection.from).toBe(sdt.pos + sdt.node.nodeSize);
     });
 
-    it('does not act on modified arrows (shift extends selection natively)', () => {
+    it('leaves word/line jumps (Alt/Ctrl/Cmd + arrow) to native movement', () => {
       const sdt = buildInlineControlDoc('checkbox');
       expect(sdt).not.toBeNull();
 
-      setCaret(sdt.pos);
-      const event = new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true });
-      let handled = false;
-      editor.view.someProp('handleKeyDown', (handler) => {
-        handled = handler(editor.view, event);
-        return handled;
-      });
+      // Alt/Ctrl/Cmd + arrow are word/line jumps we must not intercept, even when
+      // the caret sits right next to the control.
+      for (const modifier of ['altKey', 'ctrlKey', 'metaKey']) {
+        setCaret(sdt.pos);
+        const event = new KeyboardEvent('keydown', { key: 'ArrowRight', [modifier]: true, bubbles: true });
+        let handled = false;
+        editor.view.someProp('handleKeyDown', (handler) => {
+          handled = handler(editor.view, event);
+          return handled;
+        });
 
-      expect(handled).toBe(false);
+        expect(handled).toBe(false);
+      }
     });
 
     it('does not act in viewing mode', () => {
@@ -321,19 +374,63 @@ describe('AtomicControlsSelectPlugin', () => {
       expect(editor.state.selection.from).toBe(sdt.pos);
     });
 
-    it('collapses a text selection overlapping the control to a boundary outside it', () => {
+    it('keeps a range selection whose head lands inside the control, engulfing it', () => {
       const sdt = buildInlineControlDoc('checkbox');
       expect(sdt).not.toBeNull();
 
-      // Range from surrounding text into the control content.
-      const outsideStart = sdt.pos - 1; // inside the leading "A " text
-      const insideControl = sdt.pos + 2;
+      // Forward selection (anchor outside, head extended into the control) — the
+      // shape a Shift+ArrowRight or a drag across the checkbox produces.
+      const anchorOutside = sdt.pos - 1; // inside the leading "A " text
+      const headInsideControl = sdt.pos + 2;
       editor.view.dispatch(
-        editor.state.tr.setSelection(TextSelection.create(editor.state.doc, outsideStart, insideControl)),
+        editor.state.tr.setSelection(TextSelection.create(editor.state.doc, anchorOutside, headInsideControl)),
       );
 
-      expect(editor.state.selection.empty).toBe(true);
+      // The selection is preserved (not collapsed): the anchor stays put and the
+      // head is pushed out to the control's trailing edge so the whole control is
+      // covered.
+      expect(editor.state.selection.empty).toBe(false);
       expect(selectionIsInsideStructuredContent(editor.state.selection)).toBe(false);
+      expect(editor.state.selection.anchor).toBe(anchorOutside);
+      expect(editor.state.selection.head).toBe(sdt.pos + sdt.node.nodeSize);
+    });
+
+    it('keeps a backward range selection whose head lands inside the control', () => {
+      const sdt = buildInlineControlDoc('checkbox');
+      expect(sdt).not.toBeNull();
+
+      // Backward selection (anchor after the control, head extended left into it) —
+      // the shape a Shift+ArrowLeft across the checkbox produces. anchor > head.
+      const anchorOutside = sdt.pos + sdt.node.nodeSize + 1; // inside the trailing " Z"
+      const headInsideControl = sdt.pos + 2;
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.create(editor.state.doc, anchorOutside, headInsideControl)),
+      );
+
+      // Anchor stays put; the head is pushed out to the control's leading edge.
+      expect(editor.state.selection.empty).toBe(false);
+      expect(selectionIsInsideStructuredContent(editor.state.selection)).toBe(false);
+      expect(editor.state.selection.anchor).toBe(anchorOutside);
+      expect(editor.state.selection.head).toBe(sdt.pos);
+    });
+
+    it('leaves a range selection spanning the control untouched in viewing mode', () => {
+      const sdt = buildInlineControlDoc('checkbox');
+      expect(sdt).not.toBeNull();
+
+      editor.setDocumentMode('viewing');
+
+      // A read-only viewer still dispatches selection transactions when the user
+      // drags to select text for copying; the backstop must not disturb them.
+      const anchorOutside = sdt.pos - 1;
+      const headInsideControl = sdt.pos + 2;
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.create(editor.state.doc, anchorOutside, headInsideControl)),
+      );
+
+      expect(editor.state.selection.empty).toBe(false);
+      expect(editor.state.selection.anchor).toBe(anchorOutside);
+      expect(editor.state.selection.head).toBe(headInsideControl);
     });
   });
 });

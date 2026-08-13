@@ -141,15 +141,21 @@ function findAdjacentAtomicControlExit(doc, caretPos, direction) {
  * text cursor inside the control's content. This plugin keeps the caret out of
  * those controls two ways:
  *
- *  1. PROACTIVELY (`handleKeyDown`): when a collapsed caret sits just outside an
- *     inline atomic control and an arrow key would step into it, we hop the caret
- *     clean to the far side in a SINGLE press. This owns arrow traversal so the
- *     movement is symmetric (ArrowRight from the left and ArrowLeft from the right
- *     each take one press) and never fights the isolating boundary.
+ *  1. PROACTIVELY (`handleKeyDown`): when the moving end of the selection sits
+ *     just outside an inline atomic control and an arrow key would step into it,
+ *     we jump the whole control in a SINGLE press — moving the caret for a plain
+ *     arrow, or extending the selection across it for Shift+arrow. This owns arrow
+ *     traversal so the movement is symmetric (each direction takes one press) and
+ *     never fights the isolating boundary, which would otherwise stall the caret
+ *     or refuse to grow the highlight past the control.
  *
  *  2. REACTIVELY (`appendTransaction`): a backstop for everything else — a click
- *     or programmatic jump that lands the selection INSIDE a control (inline or
- *     block) gets snapped to the nearest boundary outside the wrapper.
+ *     or programmatic jump that lands a caret INSIDE a control (inline or block)
+ *     gets snapped to the nearest boundary outside the wrapper. A range selection
+ *     (shift-select / drag) whose endpoint falls inside a control is kept: only
+ *     the offending endpoint is pushed out to the control's far edge so the whole
+ *     control is engulfed, never collapsing the user's selection. Disabled in
+ *     viewing mode, where there is no caret to protect.
  *
  * Only the selection is ever changed here; the document is only touched to insert
  * a zero-width editable slot at a boundary (via `applyEditableSlotAtInlineBoundary`,
@@ -164,40 +170,61 @@ export function createAtomicControlsSelectPlugin(editor) {
 
     props: {
       /**
-       * Proactive single-press arrow traversal across an inline atomic control.
+       * Proactive single-press arrow traversal across an inline atomic control —
+       * for both a plain arrow (move the caret) and Shift+arrow (extend the
+       * selection).
        *
-       * The sibling select plugin runs first; it returns false whenever the caret
-       * is outside a structuredContent node (its boundary-exit walk finds nothing),
-       * which is exactly the case we handle here — a caret parked just OUTSIDE the
-       * control about to arrow into it. We take over that case and hop the caret to
-       * the far side; for anything else we return false and let the select plugin /
+       * The control is an `isolating` node, so native cursor/selection movement
+       * cannot cross it: a plain arrow steps INTO it (and the reactive backstop
+       * below shoves the caret back out to the edge it came from, so it bounces
+       * and never crosses), and Shift+arrow stalls the head at the boundary so the
+       * highlight refuses to grow past the control. Owning both here — jumping the
+       * whole control in one press — is the only way to traverse it cleanly.
+       *
+       *  - PLAIN arrow, collapsed caret parked just outside the control: hop the
+       *    caret clean to the far side (ensuring a legal editable slot there).
+       *  - SHIFT + arrow, head parked just outside the control: keep the anchor and
+       *    move the head to the far side, engulfing the whole control in one press.
+       *
+       * For anything else we return false and let the sibling select plugin /
        * native movement proceed.
-       *
-       * Without this, arrowing toward the control falls through to native cursor
-       * movement, which steps INTO it — and the reactive backstop below then shoves
-       * the cursor back out to the NEAREST edge, which is the one it just came from.
-       * So the cursor bounces off the control's edge and never crosses it (you can't
-       * arrow past the control). Jumping the whole control in one press, before the
-       * cursor ever enters, is the only way to traverse it cleanly.
        */
       handleKeyDown(view, event) {
-        // Mirror the select plugin's guards: only bare Left/Right arrows on a
-        // collapsed caret, and never in viewing mode.
+        // Keep word/line jumps (Alt/Ctrl/Cmd + arrow) native; we only own bare and
+        // Shift + Left/Right. Never act in viewing mode.
         if (editor?.options?.documentMode === 'viewing') return false;
         if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return false;
-        if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+        if (event.altKey || event.ctrlKey || event.metaKey) return false;
 
         const { state } = view;
         const { selection } = state;
-        if (!selection.empty) return false;
+
+        // A plain arrow with an active range collapses that range natively — leave
+        // it. We only own the collapsed-caret hop and Shift-extension.
+        if (!event.shiftKey && !selection.empty) return false;
 
         const direction = event.key === 'ArrowRight' ? 'right' : 'left';
-        const exitPos = findAdjacentAtomicControlExit(state.doc, selection.from, direction);
+
+        // The moving end is the head (head === from for a collapsed caret). Look
+        // for an atomic control sitting right next to it in the direction of travel.
+        const exitPos = findAdjacentAtomicControlExit(state.doc, selection.head, direction);
         if (exitPos == null) return false;
 
         try {
-          // Land just past the control, ensuring a legal editable slot at that
-          // boundary — parity with how the select plugin exits an inline SDT.
+          if (event.shiftKey) {
+            // EXTEND: keep the anchor fixed and jump the head to the far side of
+            // the control. No editable slot is inserted — the boundary is already
+            // a legal selection endpoint, and we must not mutate the document just
+            // to grow a selection.
+            const extended = TextSelection.create(state.doc, selection.anchor, exitPos);
+            view.dispatch(state.tr.setSelection(extended));
+            event.preventDefault();
+            return true;
+          }
+
+          // MOVE: land the caret just past the control, ensuring a legal editable
+          // slot at that boundary — parity with how the select plugin exits an
+          // inline SDT.
           const boundarySide = direction === 'right' ? 'after' : 'before';
           const tr = applyEditableSlotAtInlineBoundary(state.tr, exitPos, boundarySide);
           view.dispatch(tr);
@@ -210,6 +237,14 @@ export function createAtomicControlsSelectPlugin(editor) {
     },
 
     appendTransaction(transactions, oldState, newState) {
+      // In a read-only viewer there is no caret to protect — the user is only
+      // selecting text to read or copy, and a keydown never reaches a plugin in a
+      // read-only view (it is gated behind `view.editable`). `appendTransaction`
+      // has no such gate: it runs on the selection-only transactions a read-only
+      // view still dispatches, so without this guard selecting across a control
+      // would corrupt the user's selection. Mirror the sibling select plugin.
+      if (editor?.options?.documentMode === 'viewing') return undefined;
+
       const { selection } = newState;
 
       // Only react to selection moves. If the document changed, another
@@ -220,34 +255,63 @@ export function createAtomicControlsSelectPlugin(editor) {
       // Nothing to do if the selection did not move.
       if (oldState.selection.eq(selection)) return undefined;
 
-      // Backstop for clicks / programmatic jumps that land the selection inside an
-      // atomic control (arrow traversal is owned by handleKeyDown above). A
-      // selection can have its endpoints in different controls (or one inside, one
-      // outside); snap toward whichever atomic control an endpoint sits in and
-      // collapse to a single caret at the NEAREST boundary outside that control.
+      // --- Empty caret that landed inside a control (click / programmatic jump) ---
+      // Snap the lone caret to the NEAREST boundary outside the wrapper and keep it
+      // collapsed. Arrow traversal is owned by handleKeyDown above.
+      if (selection.empty) {
+        const control = findEnclosingAtomicControl(selection.$from);
+        if (!control) return undefined;
+
+        const distanceToStart = selection.from - control.before;
+        const distanceToEnd = control.after - selection.from;
+        const targetBoundary = distanceToStart <= distanceToEnd ? control.before : control.after;
+
+        // Resolve to the nearest *valid* text position at that boundary. Selection.near
+        // steps over the wrapper if the exact boundary is not a legal caret spot.
+        const $boundary = newState.doc.resolve(targetBoundary);
+        const normalizedCaret = Selection.near($boundary, targetBoundary === control.before ? -1 : 1);
+
+        // Guard against loops / no-op churn: if we would land back on the current
+        // selection (or still inside an atomic control), do nothing.
+        if (normalizedCaret.eq(selection)) return undefined;
+        if (findEnclosingAtomicControl(normalizedCaret.$from)) return undefined;
+
+        return newState.tr.setSelection(TextSelection.create(newState.doc, normalizedCaret.from));
+      }
+
+      // --- Range selection with an endpoint inside a control (shift-select / drag) ---
+      // Don't destroy the selection. A checkbox / dropdown is atomic to a
+      // selection — you cannot grab half of it — so push only the endpoint that
+      // sits inside a control out to that control's far edge, engulfing the whole
+      // control while keeping the anchor, and the range, intact.
       const fromControl = findEnclosingAtomicControl(selection.$from);
       const toControl = findEnclosingAtomicControl(selection.$to);
-      const control = fromControl ?? toControl;
-      if (!control) return undefined;
+      if (!fromControl && !toControl) return undefined;
 
-      const anchorInsideControl = fromControl ? selection.from : selection.to;
+      // `$from` is the lower end and `$to` the higher end. Extend each end that is
+      // inside a control outward: the lower end to the control's leading edge, the
+      // higher end to its trailing edge.
+      const expandedFrom = fromControl ? fromControl.before : selection.from;
+      const expandedTo = toControl ? toControl.after : selection.to;
 
-      const distanceToStart = anchorInsideControl - control.before;
-      const distanceToEnd = control.after - anchorInsideControl;
-      const targetBoundary = distanceToStart <= distanceToEnd ? control.before : control.after;
+      // Preserve selection direction so a follow-up Shift+Arrow keeps extending
+      // the same end the user was already moving.
+      const anchorIsLowerEnd = selection.anchor <= selection.head;
+      const anchorPos = anchorIsLowerEnd ? expandedFrom : expandedTo;
+      const headPos = anchorIsLowerEnd ? expandedTo : expandedFrom;
 
-      // Resolve to the nearest *valid* text position at that boundary. Selection.near
-      // steps over the wrapper if the exact boundary is not a legal caret spot.
-      const $boundary = newState.doc.resolve(targetBoundary);
-      const normalizedSelection = Selection.near($boundary, targetBoundary === control.before ? -1 : 1);
+      // TextSelection.between snaps each end to the nearest valid text position,
+      // so a boundary that is not itself a legal caret spot still resolves cleanly.
+      const expandedSelection = TextSelection.between(newState.doc.resolve(anchorPos), newState.doc.resolve(headPos));
 
-      // Guard against loops / no-op churn: if we would land back on the current
-      // selection (or still inside an atomic control), do nothing.
-      if (normalizedSelection.eq(selection)) return undefined;
-      if (findEnclosingAtomicControl(normalizedSelection.$from)) return undefined;
+      // Guard against loops / no-op churn: bail if nothing changed or an endpoint
+      // is still trapped inside a control after snapping (rare block-control
+      // geometry) rather than emit a selection the backstop would just re-process.
+      if (expandedSelection.eq(selection)) return undefined;
+      if (findEnclosingAtomicControl(expandedSelection.$from)) return undefined;
+      if (findEnclosingAtomicControl(expandedSelection.$to)) return undefined;
 
-      const collapsed = TextSelection.create(newState.doc, normalizedSelection.from);
-      return newState.tr.setSelection(collapsed);
+      return newState.tr.setSelection(expandedSelection);
     },
   });
 }
