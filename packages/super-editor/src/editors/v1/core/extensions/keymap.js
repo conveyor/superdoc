@@ -72,6 +72,11 @@ export const handleBackspace = (editor) => {
     () => commands.removeNumberingProperties(),
     () => commands.joinBackward(),
     () => commands.selectNodeBackward(),
+    // Final fallback: Consume Backspace at an isolating inline-SDT boundary so
+    // native contentEditable (which ProseMirror falls through to) cannot corrupt
+    // the surrounding structure (otherwise pressing backspace in front of anchored
+    // metadata in a table cell corrupts the table).
+    () => commands.backspaceAtIsolatingInlineSdtBoundary(),
   ]);
 };
 

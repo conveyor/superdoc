@@ -89,7 +89,7 @@ import type {
 } from '@superdoc/document-api';
 import { DocumentApiAdapterError } from '../errors.js';
 import { executeDomainCommand } from './plan-wrappers.js';
-import { clearIndexCache } from '../helpers/index-cache.js';
+import { getSdtIndex, clearIndexCache } from '../helpers/index-cache.js';
 import { buildTextWithTabs, parentAllowsNodeAt } from '../helpers/text-with-tabs.js';
 import { resolveSelectionTarget } from '../helpers/selection-target-resolver.js';
 
@@ -97,7 +97,6 @@ import { resolveSelectionTarget } from '../helpers/selection-target-resolver.js'
 import {
   SDT_BLOCK_NAME,
   isSdtNode,
-  findAllSdtNodes,
   resolveSdtByTarget,
   resolveControlType,
   resolveBinding,
@@ -136,6 +135,18 @@ function isValidWordSdtId(id: string): boolean {
   if (!/^-?\d+$/.test(id)) return false;
   const n = Number(id);
   return n >= -2147483648 && n <= 2147483647;
+}
+
+/**
+ * Resolve one SDT by target against the editor's current committed document,
+ * reusing the cached SDT index instead of re-walking the whole doc.
+ *
+ * Only safe when resolving against `editor.state.doc` (the snapshot the cache
+ * is keyed on). Mutation handlers that resolve against a mid-transaction
+ * `tr.doc` must keep calling `resolveSdtByTarget(tr.doc, target)` directly.
+ */
+function resolveSdtByTargetCached(editor: Editor, target: ContentControlTarget): ReturnType<typeof resolveSdtByTarget> {
+  return resolveSdtByTarget(editor.state.doc, target, getSdtIndex(editor).all);
 }
 
 /** Names that are forbidden from patchRawProperties per §10 of the plan. */
@@ -359,7 +370,7 @@ function alreadyMatchesPlainTextReplacement(
  * here; this helper trusts that guard and emits a content-range step.
  */
 function replaceSdtTextContent(editor: Editor, target: ContentControlTarget, text: string): boolean {
-  const resolved = resolveSdtByTarget(editor.state.doc, target);
+  const resolved = resolveSdtByTargetCached(editor, target);
   const { tr } = editor.state;
   const innerFrom = resolved.pos + 1;
   const innerTo = resolved.pos + resolved.node.nodeSize - 1;
@@ -389,7 +400,7 @@ function replaceSdtTextContent(editor: Editor, target: ContentControlTarget, tex
 // ---------------------------------------------------------------------------
 
 function listWrapper(editor: Editor, query?: ContentControlsListQuery): ContentControlsListResult {
-  const allSdts = findAllSdtNodes(editor.state.doc);
+  const allSdts = getSdtIndex(editor).all;
   let infos = allSdts.map(buildContentControlInfoFromNode);
 
   if (query?.controlType) {
@@ -403,13 +414,13 @@ function listWrapper(editor: Editor, query?: ContentControlsListQuery): ContentC
 }
 
 function getWrapper(editor: Editor, input: ContentControlsGetInput): ContentControlInfo {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   return buildContentControlInfoFromNode(sdt);
 }
 
 function listInRangeWrapper(editor: Editor, input: ContentControlsListInRangeInput): ContentControlsListResult {
   const doc = editor.state.doc;
-  const allSdts = findAllSdtNodes(doc);
+  const allSdts = getSdtIndex(editor).all;
 
   // Resolve block range bounds via the block index (block IDs, not SDT IDs).
   let rangeStart = 0;
@@ -437,19 +448,19 @@ function listInRangeWrapper(editor: Editor, input: ContentControlsListInRangeInp
 }
 
 function selectByTagWrapper(editor: Editor, input: ContentControlsSelectByTagInput): ContentControlsListResult {
-  const allSdts = findAllSdtNodes(editor.state.doc);
+  const allSdts = getSdtIndex(editor).all;
   const infos = allSdts.map(buildContentControlInfoFromNode).filter((info) => info.properties.tag === input.tag);
   return applyPagination(infos, input);
 }
 
 function selectByTitleWrapper(editor: Editor, input: ContentControlsSelectByTitleInput): ContentControlsListResult {
-  const allSdts = findAllSdtNodes(editor.state.doc);
+  const allSdts = getSdtIndex(editor).all;
   const infos = allSdts.map(buildContentControlInfoFromNode).filter((info) => info.properties.alias === input.title);
   return applyPagination(infos, input);
 }
 
 function listChildrenWrapper(editor: Editor, input: ContentControlsListChildrenInput): ContentControlsListResult {
-  const parent = resolveSdtByTarget(editor.state.doc, input.target);
+  const parent = resolveSdtByTargetCached(editor, input.target);
   const children: { node: typeof parent.node; pos: number; kind: 'block' | 'inline' }[] = [];
 
   parent.node.forEach((child, offset) => {
@@ -467,7 +478,7 @@ function listChildrenWrapper(editor: Editor, input: ContentControlsListChildrenI
 }
 
 function getParentWrapper(editor: Editor, input: ContentControlsGetParentInput): ContentControlInfo | null {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const $pos = editor.state.doc.resolve(sdt.pos);
 
   for (let depth = $pos.depth - 1; depth >= 0; depth--) {
@@ -494,13 +505,13 @@ function wrapWrapper(
   options?: MutationOptions,
 ): ContentControlMutationResult {
   // Validate the target exists before mutating.
-  resolveSdtByTarget(editor.state.doc, input.target);
+  resolveSdtByTargetCached(editor, input.target);
 
   const id = generateSdtId();
   const wrapperTarget: ContentControlTarget = { kind: input.kind, nodeType: 'sdt', nodeId: id };
 
   return executeSdtMutation(editor, input.target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const nodeTypeName = input.kind === 'block' ? SDT_BLOCK_NAME : 'structuredContent';
     const nodeType = editor.schema.nodes[nodeTypeName];
     if (!nodeType) return false;
@@ -531,12 +542,12 @@ function unwrapWrapper(
   input: ContentControlsUnwrapInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'unwrap');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const { tr } = editor.state;
     tr.replaceWith(resolved.pos, resolved.pos + resolved.node.nodeSize, resolved.node.content);
     dispatchTransaction(editor, tr);
@@ -549,7 +560,7 @@ function deleteWrapper(
   input: ContentControlsDeleteInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'delete');
   const target = buildTarget(sdt);
 
@@ -568,12 +579,12 @@ function copyWrapper(
   input: ContentControlsCopyInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  resolveSdtByTarget(editor.state.doc, input.target);
+  resolveSdtByTargetCached(editor, input.target);
   const target = input.target;
 
   return executeSdtMutation(editor, target, options, () => {
-    const source = resolveSdtByTarget(editor.state.doc, input.target);
-    const dest = resolveSdtByTarget(editor.state.doc, input.destination);
+    const source = resolveSdtByTargetCached(editor, input.target);
+    const dest = resolveSdtByTargetCached(editor, input.destination);
     const newId = generateSdtId();
     const cloned = reIdDescendantSdts(
       source.node.type.create({ ...source.node.attrs, id: newId }, source.node.content, source.node.marks),
@@ -592,12 +603,12 @@ function moveWrapper(
   input: ContentControlsMoveInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'move');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const source = resolveSdtByTarget(editor.state.doc, input.target);
+    const source = resolveSdtByTargetCached(editor, input.target);
     const { tr } = editor.state;
     tr.delete(source.pos, source.pos + source.node.nodeSize);
     const destAfterDelete = resolveSdtByTarget(tr.doc, input.destination);
@@ -613,7 +624,7 @@ function patchWrapper(
   input: ContentControlsPatchInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'patch');
   const target = buildTarget(sdt);
 
@@ -637,7 +648,7 @@ function setLockModeWrapper(
   input: ContentControlsSetLockModeInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
@@ -869,7 +880,7 @@ function setTypeWrapper(
   input: ContentControlsSetTypeInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'setType');
   const currentType = resolveControlType(sdt.node.attrs as Record<string, unknown>);
 
@@ -910,7 +921,7 @@ function setTypeWrapper(
 // ---------------------------------------------------------------------------
 
 function getContentWrapper(editor: Editor, input: ContentControlsGetContentInput): ContentControlsGetContentResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   return { content: sdt.node.textContent, format: 'text' };
 }
 
@@ -919,7 +930,7 @@ function replaceContentWrapper(
   input: ContentControlsReplaceContentInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotContentLocked(sdt, 'replaceContent');
   if ((input.format ?? 'text') === 'text' && alreadyMatchesPlainTextReplacement(sdt, input.content)) {
     return buildMutationFailure('NO_OP', 'Content control already contains the requested text.');
@@ -936,7 +947,7 @@ function clearContentWrapper(
   input: ContentControlsClearContentInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotContentLocked(sdt, 'clearContent');
   if (alreadyMatchesPlainTextReplacement(sdt, '')) {
     return buildMutationFailure('NO_OP', 'Content control is already empty.');
@@ -953,7 +964,7 @@ function appendContentWrapper(
   input: ContentControlsAppendContentInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotContentLocked(sdt, 'appendContent');
   if (input.content.length === 0) {
     return buildMutationFailure('NO_OP', 'Appended content is empty.');
@@ -961,7 +972,7 @@ function appendContentWrapper(
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const currentText = resolved.node.textContent;
     return replaceSdtTextContent(editor, input.target, currentText + input.content);
   });
@@ -972,7 +983,7 @@ function prependContentWrapper(
   input: ContentControlsPrependContentInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotContentLocked(sdt, 'prependContent');
   if (input.content.length === 0) {
     return buildMutationFailure('NO_OP', 'Prepended content is empty.');
@@ -980,7 +991,7 @@ function prependContentWrapper(
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const currentText = resolved.node.textContent;
     return replaceSdtTextContent(editor, input.target, input.content + currentText);
   });
@@ -992,7 +1003,7 @@ function insertTextAroundSdt(
   content: string,
   resolvePos: (resolved: ReturnType<typeof resolveSdtByTarget>) => number,
 ): boolean {
-  const resolved = resolveSdtByTarget(editor.state.doc, target);
+  const resolved = resolveSdtByTargetCached(editor, target);
   const pos = resolvePos(resolved);
   const { tr } = editor.state;
   const tabType = editor.schema.nodes?.tab;
@@ -1010,7 +1021,7 @@ function insertBeforeWrapper(
   input: ContentControlsInsertBeforeInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const target = buildTarget(sdt);
   return executeSdtMutation(editor, target, options, () =>
     insertTextAroundSdt(editor, input.target, input.content, (resolved) => resolved.pos),
@@ -1022,7 +1033,7 @@ function insertAfterWrapper(
   input: ContentControlsInsertAfterInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const target = buildTarget(sdt);
   return executeSdtMutation(editor, target, options, () =>
     insertTextAroundSdt(editor, input.target, input.content, (resolved) => resolved.pos + resolved.node.nodeSize),
@@ -1034,7 +1045,7 @@ function insertAfterWrapper(
 // ---------------------------------------------------------------------------
 
 function getBindingWrapper(editor: Editor, input: ContentControlsGetBindingInput): ContentControlBinding | null {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   return resolveBinding(sdt.node.attrs as Record<string, unknown>) ?? null;
 }
 
@@ -1043,7 +1054,7 @@ function setBindingWrapper(
   input: ContentControlsSetBindingInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'setBinding');
   const target = buildTarget(sdt);
 
@@ -1067,7 +1078,7 @@ function clearBindingWrapper(
   input: ContentControlsClearBindingInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertNotSdtLocked(sdt, 'clearBinding');
   const target = buildTarget(sdt);
 
@@ -1080,7 +1091,7 @@ function getRawPropertiesWrapper(
   editor: Editor,
   input: ContentControlsGetRawPropertiesInput,
 ): ContentControlsGetRawPropertiesResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const sdtPr = sdt.node.attrs.sdtPr;
   const properties = typeof sdtPr === 'object' && sdtPr !== null ? ({ ...sdtPr } as Record<string, unknown>) : {};
   return { properties };
@@ -1091,7 +1102,7 @@ function patchRawPropertiesWrapper(
   input: ContentControlsPatchRawPropertiesInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const target = buildTarget(sdt);
 
   // Validate forbidden mutations per §10 of the plan
@@ -1131,7 +1142,7 @@ function patchRawPropertiesWrapper(
   }
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     let currentSdtPr = (resolved.node.attrs.sdtPr ?? { name: 'w:sdtPr', elements: [] }) as SdtPrElement;
 
     for (const patch of input.patches) {
@@ -1178,7 +1189,7 @@ function validateWordCompatibilityWrapper(
   editor: Editor,
   input: ContentControlsValidateWordCompatibilityInput,
 ): ContentControlsValidateWordCompatibilityResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const attrs = sdt.node.attrs as Record<string, unknown>;
   const diagnostics: ContentControlsValidateWordCompatibilityResult['diagnostics'] = [];
   const id = String(attrs.id ?? '');
@@ -1199,7 +1210,7 @@ function normalizeWordCompatibilityWrapper(
   input: ContentControlsNormalizeWordCompatibilityInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const target = buildTarget(sdt);
   const id = String(sdt.node.attrs.id ?? '');
 
@@ -1218,7 +1229,7 @@ function normalizeTagPayloadWrapper(
   input: ContentControlsNormalizeTagPayloadInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   const target = buildTarget(sdt);
   const tag = sdt.node.attrs.tag as string | undefined;
 
@@ -1232,7 +1243,7 @@ function normalizeTagPayloadWrapper(
   }
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const currentTag = resolved.node.attrs.tag ?? '';
     return applyAttrsUpdate(editor, input.target.nodeId, { tag: JSON.stringify({ value: currentTag }) });
   });
@@ -1247,7 +1258,7 @@ function textSetMultilineWrapper(
   input: ContentControlsTextSetMultilineInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'text', 'text.setMultiline');
   assertNotSdtLocked(sdt, 'text.setMultiline');
   const target = buildTarget(sdt);
@@ -1267,7 +1278,7 @@ function textSetValueWrapper(
   input: ContentControlsTextSetValueInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'text', 'text.setValue');
   assertNotContentLocked(sdt, 'text.setValue');
   if (alreadyMatchesPlainTextReplacement(sdt, input.value)) {
@@ -1285,7 +1296,7 @@ function textClearValueWrapper(
   input: ContentControlsTextClearValueInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'text', 'text.clearValue');
   assertNotContentLocked(sdt, 'text.clearValue');
   if (alreadyMatchesPlainTextReplacement(sdt, '')) {
@@ -1311,7 +1322,7 @@ function updateDateSubElement(
   operation: string,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, target);
+  const sdt = resolveSdtByTargetCached(editor, target);
   assertControlType(sdt, 'date', operation);
   assertNotSdtLocked(sdt, operation);
   const resolvedTarget = buildTarget(sdt);
@@ -1326,19 +1337,26 @@ function dateSetValueWrapper(
   input: ContentControlsDateSetValueInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'date', 'date.setValue');
   assertNotSdtLocked(sdt, 'date.setValue');
   const target = buildTarget(sdt);
 
   // w:fullDate is an attribute on w:date itself, not a sub-element
   return executeSdtMutation(editor, target, options, () => {
-    return updateSdtPrChild(editor, input.target, 'w:date', (existing) => ({
+    // The stored value lives in w:sdtPr/w:date/@w:fullDate.
+    const metadataUpdated = updateSdtPrChild(editor, input.target, 'w:date', (existing) => ({
       name: 'w:date',
       type: 'element',
       ...existing,
       attributes: { ...(existing?.attributes ?? {}), 'w:fullDate': input.value },
     }));
+    // ...but updating w:fullDate alone leaves the SDT showing its placeholder
+    // ("Click or tap to enter a date.") forever. Mirror textSetValueWrapper and
+    // also rewrite the visible content so the rendered date actually changes.
+    const contentUpdated = replaceSdtTextContent(editor, input.target, input.value);
+    // Either step landing a change means the mutation succeeded.
+    return metadataUpdated || contentUpdated;
   });
 }
 
@@ -1347,7 +1365,7 @@ function dateClearValueWrapper(
   input: ContentControlsDateClearValueInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'date', 'date.clearValue');
   assertNotSdtLocked(sdt, 'date.clearValue');
   const target = buildTarget(sdt);
@@ -1409,7 +1427,7 @@ function checkboxGetStateWrapper(
   editor: Editor,
   input: ContentControlsCheckboxGetStateInput,
 ): ContentControlsCheckboxGetStateResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'checkbox', 'checkbox.getState');
   const sdtPr = sdt.node.attrs.sdtPr as SdtPrElement | undefined;
   return { checked: readCheckboxChecked(sdtPr) };
@@ -1420,7 +1438,7 @@ function checkboxSetStateWrapper(
   input: ContentControlsCheckboxSetStateInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'checkbox', 'checkbox.setState');
   assertNotSdtLocked(sdt, 'checkbox.setState');
   const target = buildTarget(sdt);
@@ -1445,6 +1463,13 @@ function checkboxSetStateWrapper(
           Boolean(updateCmd(input.target.nodeId, { text: symbol.char, keepTextNodeStyles: true }));
         return visualUpdated || checkboxUpdated;
       }
+    } else if (sdt.kind === 'block') {
+      // Block-scope checkboxes can't reuse the inline branch above: it feeds
+      // updateStructuredContentById a bare text node, which a block SDT's schema
+      // rejects (block content must be wrapped in a paragraph).
+      // Instead use replaceSdtTextContent to swap the glyph.
+      const visualUpdated = replaceSdtTextContent(editor, input.target, symbol.char);
+      return visualUpdated || checkboxUpdated;
     }
 
     return checkboxUpdated;
@@ -1465,7 +1490,7 @@ function checkboxSetSymbolPairWrapper(
   input: ContentControlsCheckboxSetSymbolPairInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'checkbox', 'checkbox.setSymbolPair');
   assertNotSdtLocked(sdt, 'checkbox.setSymbolPair');
   const target = buildTarget(sdt);
@@ -1523,7 +1548,7 @@ function choiceListGetItemsWrapper(
   editor: Editor,
   input: ContentControlsChoiceListGetItemsInput,
 ): ContentControlsChoiceListGetItemsResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, ['comboBox', 'dropDownList'], 'choiceList.getItems');
   const sdtPr = sdt.node.attrs.sdtPr as SdtPrElement | undefined;
   const controlType = resolveControlType(sdt.node.attrs as Record<string, unknown>) as 'comboBox' | 'dropDownList';
@@ -1535,7 +1560,7 @@ function choiceListSetItemsWrapper(
   input: ContentControlsChoiceListSetItemsInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, ['comboBox', 'dropDownList'], 'choiceList.setItems');
   assertNotSdtLocked(sdt, 'choiceList.setItems');
   const target = buildTarget(sdt);
@@ -1557,7 +1582,7 @@ function choiceListSetSelectedWrapper(
   input: ContentControlsChoiceListSetSelectedInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, ['comboBox', 'dropDownList'], 'choiceList.setSelected');
   assertNotSdtLocked(sdt, 'choiceList.setSelected');
   const target = buildTarget(sdt);
@@ -1577,11 +1602,23 @@ function choiceListSetSelectedWrapper(
     if (!selectedUpdated) return false;
 
     // Keep the SDT body text in sync so the selected option is visible in-editor and after export.
-    const updateCmd = editor.commands?.updateStructuredContentById;
-    if (typeof updateCmd === 'function') {
-      const visualUpdated = Boolean(
-        updateCmd(input.target.nodeId, { text: selectedDisplayText, keepTextNodeStyles: true }),
-      );
+    if (sdt.kind === 'inline') {
+      const updateCmd = editor.commands?.updateStructuredContentById;
+      if (typeof updateCmd === 'function') {
+        const visualUpdated = Boolean(
+          updateCmd(input.target.nodeId, { text: selectedDisplayText, keepTextNodeStyles: true }),
+        );
+        return visualUpdated || selectedUpdated;
+      }
+    } else if (sdt.kind === 'block') {
+      // Block-scope dropdowns can't reuse the inline branch above: it feeds
+      // updateStructuredContentById a bare text node, which a block SDT's schema
+      // (block content must be wrapped in a paragraph) rejects. PM's content
+      // check then rolls back the whole transaction — including the w:lastValue
+      // update above — so the selection fails silently. Mirror
+      // checkboxSetStateWrapper and use replaceSdtTextContent, which wraps the
+      // display text in a paragraph.
+      const visualUpdated = replaceSdtTextContent(editor, input.target, selectedDisplayText);
       return visualUpdated || selectedUpdated;
     }
 
@@ -1617,7 +1654,7 @@ function repeatingSectionListItemsWrapper(
   editor: Editor,
   input: ContentControlsRepeatingSectionListItemsInput,
 ): ContentControlsRepeatingSectionListItemsResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'repeatingSection', 'repeatingSection.listItems');
   const items = getRepeatingSectionItems(sdt);
   const infos = items.map(buildContentControlInfoFromNode);
@@ -1629,13 +1666,13 @@ function repeatingSectionInsertItemBeforeWrapper(
   input: ContentControlsRepeatingSectionInsertItemBeforeInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'repeatingSection', 'repeatingSection.insertItemBefore');
   assertNotContentLocked(sdt, 'repeatingSection.insertItemBefore');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const items = getRepeatingSectionItems(resolved);
     if (input.index < 0 || input.index > items.length) {
       throw new DocumentApiAdapterError('INVALID_INPUT', `Index ${input.index} out of range [0, ${items.length}].`);
@@ -1659,13 +1696,13 @@ function repeatingSectionInsertItemAfterWrapper(
   input: ContentControlsRepeatingSectionInsertItemAfterInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'repeatingSection', 'repeatingSection.insertItemAfter');
   assertNotContentLocked(sdt, 'repeatingSection.insertItemAfter');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const items = getRepeatingSectionItems(resolved);
     if (input.index < 0 || input.index >= items.length) {
       throw new DocumentApiAdapterError('INVALID_INPUT', `Index ${input.index} out of range [0, ${items.length - 1}].`);
@@ -1690,13 +1727,13 @@ function repeatingSectionCloneItemWrapper(
   input: ContentControlsRepeatingSectionCloneItemInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'repeatingSection', 'repeatingSection.cloneItem');
   assertNotContentLocked(sdt, 'repeatingSection.cloneItem');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const items = getRepeatingSectionItems(resolved);
     if (input.index < 0 || input.index >= items.length) {
       throw new DocumentApiAdapterError('INVALID_INPUT', `Index ${input.index} out of range [0, ${items.length - 1}].`);
@@ -1723,13 +1760,13 @@ function repeatingSectionDeleteItemWrapper(
   input: ContentControlsRepeatingSectionDeleteItemInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'repeatingSection', 'repeatingSection.deleteItem');
   assertNotContentLocked(sdt, 'repeatingSection.deleteItem');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const items = getRepeatingSectionItems(resolved);
     if (input.index < 0 || input.index >= items.length) {
       throw new DocumentApiAdapterError('INVALID_INPUT', `Index ${input.index} out of range [0, ${items.length - 1}].`);
@@ -1747,7 +1784,7 @@ function repeatingSectionSetAllowInsertDeleteWrapper(
   input: ContentControlsRepeatingSectionSetAllowInsertDeleteInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'repeatingSection', 'repeatingSection.setAllowInsertDelete');
   assertNotSdtLocked(sdt, 'repeatingSection.setAllowInsertDelete');
   const target = buildTarget(sdt);
@@ -1773,11 +1810,11 @@ function groupWrapWrapper(
   input: ContentControlsGroupWrapInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  resolveSdtByTarget(editor.state.doc, input.target);
+  resolveSdtByTargetCached(editor, input.target);
   const target = input.target;
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const groupNodeType = editor.schema.nodes[SDT_BLOCK_NAME];
     if (!groupNodeType) return false;
 
@@ -1796,13 +1833,13 @@ function groupUngroupWrapper(
   input: ContentControlsGroupUngroupInput,
   options?: MutationOptions,
 ): ContentControlMutationResult {
-  const sdt = resolveSdtByTarget(editor.state.doc, input.target);
+  const sdt = resolveSdtByTargetCached(editor, input.target);
   assertControlType(sdt, 'group', 'group.ungroup');
   assertNotSdtLocked(sdt, 'group.ungroup');
   const target = buildTarget(sdt);
 
   return executeSdtMutation(editor, target, options, () => {
-    const resolved = resolveSdtByTarget(editor.state.doc, input.target);
+    const resolved = resolveSdtByTargetCached(editor, input.target);
     const { tr } = editor.state;
     tr.replaceWith(resolved.pos, resolved.pos + resolved.node.nodeSize, resolved.node.content);
     dispatchTransaction(editor, tr);
@@ -1830,7 +1867,7 @@ function createWrapper(
 
   // When a reference target is provided, validate it before mutating.
   if (input.target) {
-    resolveSdtByTarget(editor.state.doc, input.target);
+    resolveSdtByTargetCached(editor, input.target);
   }
 
   return executeSdtMutation(editor, target, options, () => {
@@ -1861,7 +1898,7 @@ function createWrapper(
 
     // When a target is provided, insert adjacent to it for deterministic placement.
     if (input.target) {
-      const ref = resolveSdtByTarget(editor.state.doc, input.target);
+      const ref = resolveSdtByTargetCached(editor, input.target);
       const nodeTypeName = input.kind === 'block' ? SDT_BLOCK_NAME : 'structuredContent';
       const nodeType = editor.schema.nodes[nodeTypeName];
       if (!nodeType) return false;

@@ -109,10 +109,16 @@ export function readChoiceListData(
 ): { items: Array<{ displayText: string; value: string }>; selectedValue: string | undefined } {
   const listEl = findSdtPrChild(sdtPr, `w:${controlType}`);
   const itemElements = listEl?.elements?.filter((e) => e.name === 'w:listItem') ?? [];
-  const items = itemElements.map((item) => ({
-    displayText: String(item.attributes?.['w:displayText'] ?? ''),
-    value: String(item.attributes?.['w:value'] ?? ''),
-  }));
+  const items = itemElements.map((item) => {
+    const value = String(item.attributes?.['w:value'] ?? '');
+    const rawDisplayText = item.attributes?.['w:displayText'];
+    // Per ECMA-376, a list item whose w:displayText is omitted displays its
+    // w:value; a present w:displayText (even an empty string) is used verbatim.
+    return {
+      displayText: rawDisplayText == null ? value : String(rawDisplayText),
+      value,
+    };
+  });
   const selectedValue = listEl?.attributes?.['w:lastValue'] as string | undefined;
   return { items, selectedValue };
 }

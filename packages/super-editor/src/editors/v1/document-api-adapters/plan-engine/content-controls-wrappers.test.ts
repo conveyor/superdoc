@@ -1119,9 +1119,9 @@ describe('buildContentControlInfoFromAttrs completeness', () => {
   });
 });
 
-describe('choiceList.setSelected visual text sync', () => {
+describe('choiceList.setSelected visual text sync (inline scope)', () => {
   it('updates visible content text to the selected item displayText', () => {
-    const editor = makeSdtEditor({
+    const editor = makeInlineSdtEditor({
       controlType: 'dropDownList',
       type: 'dropDownList',
       sdtPr: {
@@ -1140,7 +1140,10 @@ describe('choiceList.setSelected visual text sync', () => {
     });
     const adapter = createContentControlsAdapter(editor);
 
-    const result = adapter.choiceList.setSelected({ target: SDT_TARGET, value: 'acme' }, { changeMode: 'direct' });
+    const result = adapter.choiceList.setSelected(
+      { target: INLINE_SDT_TARGET, value: 'acme' },
+      { changeMode: 'direct' },
+    );
     expect(result.success).toBe(true);
 
     const updateCmd = editor.commands!.updateStructuredContentById as ReturnType<typeof vi.fn>;
@@ -1149,7 +1152,7 @@ describe('choiceList.setSelected visual text sync', () => {
   });
 
   it('falls back to the selected value when no matching item is found', () => {
-    const editor = makeSdtEditor({
+    const editor = makeInlineSdtEditor({
       controlType: 'dropDownList',
       type: 'dropDownList',
       sdtPr: {
@@ -1167,12 +1170,190 @@ describe('choiceList.setSelected visual text sync', () => {
     });
     const adapter = createContentControlsAdapter(editor);
 
-    const result = adapter.choiceList.setSelected({ target: SDT_TARGET, value: 'unknown' }, { changeMode: 'direct' });
+    const result = adapter.choiceList.setSelected(
+      { target: INLINE_SDT_TARGET, value: 'unknown' },
+      { changeMode: 'direct' },
+    );
     expect(result.success).toBe(true);
 
     const updateCmd = editor.commands!.updateStructuredContentById as ReturnType<typeof vi.fn>;
     const textCall = updateCmd.mock.calls.find((call) => call[1]?.text === 'unknown');
     expect(textCall).toBeDefined();
+  });
+});
+
+describe('choiceList.setSelected visual text sync (block scope)', () => {
+  // Build a block-scope dropdown control (sdtContent wraps a paragraph carrying
+  // the displayed option), as produced by a "Yes/No" dropdown on its own line.
+  function makeBlockDropdownEditor() {
+    return makeSdtEditor(
+      {
+        controlType: 'dropDownList',
+        type: 'dropDownList',
+        sdtPr: {
+          name: 'w:sdtPr',
+          elements: [
+            {
+              name: 'w:dropDownList',
+              type: 'element',
+              elements: [
+                { name: 'w:listItem', type: 'element', attributes: { 'w:displayText': 'Yes', 'w:value': 'Yes' } },
+                { name: 'w:listItem', type: 'element', attributes: { 'w:displayText': 'No', 'w:value': 'No' } },
+              ],
+            },
+          ],
+        },
+      },
+      [createParagraphNode('Select an item.')],
+    );
+  }
+
+  // setSelected must rewrite the SDT's visible text for block-scope dropdowns,
+  // not only w:lastValue; otherwise the option never changes on screen. The
+  // block path can't use updateStructuredContentById (it builds inline text JSON
+  // the block schema rejects, rolling back the whole transaction incl. the
+  // w:lastValue write), so the rewrite surfaces as a tr.replaceWith of the inner
+  // range. Mirror the checkbox block-scope tests.
+  it('rewrites the visible text for block-scope dropdowns, not just w:lastValue', () => {
+    const editor = makeBlockDropdownEditor();
+    const adapter = createContentControlsAdapter(editor);
+
+    const result = adapter.choiceList.setSelected({ target: SDT_TARGET, value: 'Yes' }, { changeMode: 'direct' });
+
+    expect(result.success).toBe(true);
+    expect((editor.state.tr as any).replaceWith).toHaveBeenCalledTimes(1);
+  });
+
+  it('still writes w:lastValue to the dropdown sdtPr child', () => {
+    const editor = makeBlockDropdownEditor();
+    const adapter = createContentControlsAdapter(editor);
+
+    adapter.choiceList.setSelected({ target: SDT_TARGET, value: 'Yes' }, { changeMode: 'direct' });
+
+    const setAttr = (editor.state.tr as any).setNodeAttribute as ReturnType<typeof vi.fn>;
+    const sdtPrCall = setAttr.mock.calls.find((call: any[]) => call[1] === 'sdtPr');
+    expect(sdtPrCall).toBeDefined();
+    const writtenSdtPr = sdtPrCall?.[2] as { elements?: Array<{ name: string; attributes?: Record<string, string> }> };
+    const dropdownEl = writtenSdtPr?.elements?.find((el) => el.name === 'w:dropDownList');
+    expect(dropdownEl?.attributes?.['w:lastValue']).toBe('Yes');
+  });
+});
+
+describe('date.setValue visual text sync', () => {
+  // Build a block date control whose visible content is the Word placeholder
+  // ("Click or tap to enter a date."), mirroring the date_control.docx fixture.
+  function makeDateControlEditor() {
+    return makeSdtEditor(
+      {
+        controlType: 'date',
+        type: 'date',
+        sdtPr: {
+          name: 'w:sdtPr',
+          elements: [
+            {
+              name: 'w:date',
+              type: 'element',
+              attributes: {},
+              elements: [{ name: 'w:dateFormat', type: 'element', attributes: { 'w:val': 'dd/MM/yyyy' } }],
+            },
+          ],
+        },
+      },
+      [createParagraphNode('Click or tap to enter a date.')],
+    );
+  }
+
+  // setValue must rewrite the SDT's visible content range, not only w:fullDate
+  // (the stored value); otherwise the control keeps showing its placeholder.
+  // Surfaced here as a tr.replaceWith.
+  it('rewrites the visible content range so the rendered date updates, not just w:fullDate', () => {
+    const editor = makeDateControlEditor();
+    const adapter = createContentControlsAdapter(editor);
+
+    const result = adapter.date.setValue({ target: SDT_TARGET, value: '2026-05-24' }, { changeMode: 'direct' });
+
+    expect(result.success).toBe(true);
+    expect((editor.state.tr as any).replaceWith).toHaveBeenCalledTimes(1);
+  });
+
+  it('still writes w:fullDate to the w:date sdtPr child (stored value)', () => {
+    const editor = makeDateControlEditor();
+    const adapter = createContentControlsAdapter(editor);
+
+    adapter.date.setValue({ target: SDT_TARGET, value: '2026-05-24' }, { changeMode: 'direct' });
+
+    // Metadata writes flow through tr.setNodeAttribute (AttrStep) as a full sdtPr replace.
+    const setAttr = (editor.state.tr as any).setNodeAttribute as ReturnType<typeof vi.fn>;
+    const sdtPrCall = setAttr.mock.calls.find((call: any[]) => call[1] === 'sdtPr');
+    expect(sdtPrCall).toBeDefined();
+    const writtenSdtPr = sdtPrCall?.[2] as { elements?: Array<{ name: string; attributes?: Record<string, unknown> }> };
+    const dateEl = writtenSdtPr?.elements?.find((el) => el.name === 'w:date');
+    expect(dateEl?.attributes?.['w:fullDate']).toBe('2026-05-24');
+  });
+});
+
+describe('checkbox.setState visual glyph sync (block scope)', () => {
+  // Build a block-scope checkbox control (sdtContent wraps a paragraph carrying
+  // the glyph), as produced by stacked Yes/No checkboxes inside a table cell.
+  function makeBlockCheckboxEditor() {
+    return makeSdtEditor(
+      {
+        controlType: 'checkbox',
+        type: 'checkbox',
+        sdtPr: {
+          name: 'w:sdtPr',
+          elements: [
+            {
+              name: 'w14:checkbox',
+              type: 'element',
+              elements: [
+                { name: 'w14:checked', type: 'element', attributes: { 'w14:val': '0' } },
+                {
+                  name: 'w14:checkedState',
+                  type: 'element',
+                  attributes: { 'w14:val': '2612', 'w14:font': 'MS Gothic' },
+                },
+                {
+                  name: 'w14:uncheckedState',
+                  type: 'element',
+                  attributes: { 'w14:val': '2610', 'w14:font': 'MS Gothic' },
+                },
+              ],
+            },
+          ],
+        },
+      },
+      [createParagraphNode('☐')],
+    );
+  }
+
+  // setState must rewrite the SDT's visible glyph for block-scope checkboxes, not
+  // only w14:checked; otherwise the box never swaps ☐ -> ☒. The block path can't
+  // use updateStructuredContentById (it builds inline text JSON the block schema
+  // rejects), so the rewrite surfaces as a tr.replaceWith of the inner range.
+  it('rewrites the visible glyph for block-scope checkboxes, not just w14:checked', () => {
+    const editor = makeBlockCheckboxEditor();
+    const adapter = createContentControlsAdapter(editor);
+
+    const result = adapter.checkbox.setState({ target: SDT_TARGET, checked: true }, { changeMode: 'direct' });
+
+    expect(result.success).toBe(true);
+    expect((editor.state.tr as any).replaceWith).toHaveBeenCalledTimes(1);
+  });
+
+  it('still writes w14:checked to the checkbox sdtPr child', () => {
+    const editor = makeBlockCheckboxEditor();
+    const adapter = createContentControlsAdapter(editor);
+
+    adapter.checkbox.setState({ target: SDT_TARGET, checked: true }, { changeMode: 'direct' });
+
+    const setAttr = (editor.state.tr as any).setNodeAttribute as ReturnType<typeof vi.fn>;
+    const sdtPrCall = setAttr.mock.calls.find((call: any[]) => call[1] === 'sdtPr');
+    expect(sdtPrCall).toBeDefined();
+    const writtenSdtPr = sdtPrCall?.[2] as { elements?: Array<{ name: string; elements?: any[] }> };
+    const checkboxEl = writtenSdtPr?.elements?.find((el) => el.name === 'w14:checkbox');
+    const checkedEl = checkboxEl?.elements?.find((el: any) => el.name === 'w14:checked');
+    expect(checkedEl?.attributes?.['w14:val']).toBe('1');
   });
 });
 

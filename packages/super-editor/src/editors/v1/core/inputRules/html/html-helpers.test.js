@@ -58,6 +58,50 @@ describe('html list helpers', () => {
     expect(generateNewListDefinitionMock).toHaveBeenCalled();
   });
 
+  it('flattens deeply nested lists without duplicating or misplacing items', () => {
+    // Should show:
+    //   1. First
+    //      a. First-A
+    //         • Deep-1
+    //         • Deep-2
+    //      b. First-B
+    //   2. Second
+    const html =
+      '<ol>' +
+      '<li>First' +
+      '<ol>' +
+      '<li>First-A<ul><li>Deep-1</li><li>Deep-2</li></ul></li>' +
+      '<li>First-B</li>' +
+      '</ol>' +
+      '</li>' +
+      '<li>Second</li>' +
+      '</ol>';
+
+    const flattened = flattenListsInHtml(html, editor);
+    const parsed = new DOMParser().parseFromString(`<body>${flattened}</body>`, 'text/html');
+    const rows = [...parsed.querySelectorAll('p[data-num-id]')].map((p) => ({
+      text: p.textContent.trim(),
+      level: p.getAttribute('data-level'),
+      numId: p.getAttribute('data-num-id'),
+    }));
+
+    expect(rows.map((r) => r.text)).toEqual(['First', 'First-A', 'Deep-1', 'Deep-2', 'First-B', 'Second']);
+    expect(rows.map((r) => r.level)).toEqual(['0', '1', '2', '2', '1', '0']);
+
+    // Every ordered item (levels 0 and 1) belongs to the same list; the two
+    // bullets share a separate list of their own.
+    const numIds = rows.map((r) => r.numId);
+    const orderedNumId = numIds[0];
+    expect([numIds[0], numIds[1], numIds[4], numIds[5]]).toEqual([
+      orderedNumId,
+      orderedNumId,
+      orderedNumId,
+      orderedNumId,
+    ]);
+    expect(numIds[2]).toBe(numIds[3]);
+    expect(numIds[2]).not.toBe(orderedNumId);
+  });
+
   it('creates a single-item list with numbering metadata', () => {
     const doc = new DOMParser().parseFromString('<li style="color:red">Solo</li>', 'text/html');
     const li = doc.body.firstElementChild;

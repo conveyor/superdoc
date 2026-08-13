@@ -35,6 +35,7 @@
     "build:dev": "pnpm --prefix packages/superdoc run build:dev",
     "build:es": "pnpm --prefix packages/superdoc run build:es",
     "pack:es": "pnpm --prefix packages/superdoc run pack:es",
+    "publish:conveyor": "bash scripts/conveyor/publish-fork.sh",
     "clean:packages": "rm -rf ./packages/**/dist ./shared/**/dist",
     "reset": "pnpm run clean:packages && find . -name 'node_modules' -type d -prune -exec rm -rf {} + && find . -name 'package-lock.json' -type f -delete && pnpm install",
     "publish": "node scripts/publish-superdoc.cjs",
