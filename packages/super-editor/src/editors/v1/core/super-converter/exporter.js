@@ -185,6 +185,81 @@ export const normalizePgMarTwipsInTree = (node) => {
   }
 };
 
+/**
+ * Namespace URIs for prefixes Word emits with generated names.
+ *
+ * Word writes some parts with sequential prefixes (`ns5`, `ns6`, `ns8`, …)
+ * declared locally rather than the conventional ones, so a document can use a
+ * namespace whose prefix is nowhere in DEFAULT_DOCX_DEFS. We can still resolve
+ * the well-known ones by the element they carry.
+ */
+const KNOWN_NAMESPACE_BY_ELEMENT = Object.freeze({
+  useLocalDpi: 'http://schemas.microsoft.com/office/drawing/2010/main',
+  compatExt: 'http://schemas.microsoft.com/office/drawing/2010/main',
+  extLst: 'http://schemas.openxmlformats.org/drawingml/2006/main',
+});
+
+/** Prefix of a qualified name, or null when it is unqualified. */
+const prefixOf = (name) => {
+  if (typeof name !== 'string') return null;
+  const colon = name.indexOf(':');
+  if (colon <= 0) return null;
+  const prefix = name.slice(0, colon);
+  return prefix === 'xmlns' || prefix === 'xml' ? null : prefix;
+};
+
+/** Every namespace prefix used by an element name or attribute name in `node`. */
+const collectUsedPrefixes = (node, out = new Map()) => {
+  if (!node || typeof node !== 'object') return out;
+
+  const elementPrefix = prefixOf(node.name);
+  // Remember one element per prefix so an unknown prefix can still be resolved
+  // by the local name it qualifies.
+  if (elementPrefix && !out.has(elementPrefix)) {
+    out.set(elementPrefix, node.name.slice(elementPrefix.length + 1));
+  }
+
+  if (node.attributes && typeof node.attributes === 'object') {
+    for (const attr of Object.keys(node.attributes)) {
+      const attrPrefix = prefixOf(attr);
+      if (attrPrefix && !out.has(attrPrefix)) out.set(attrPrefix, null);
+    }
+  }
+
+  if (Array.isArray(node.elements)) {
+    for (const child of node.elements) collectUsedPrefixes(child, out);
+  }
+  return out;
+};
+
+/**
+ * Declare any namespace prefix the tree uses but the root does not bind.
+ *
+ * An undeclared prefix makes `word/document.xml` malformed: strict parsers
+ * reject the file outright ("unbound prefix"), and lenient ones degrade
+ * silently — Google's document translation, for one, leaves surrounding runs
+ * untranslated. Word itself emits the offending markup: a picture's
+ * `<a14:useLocalDpi>` arrives under a generated prefix (`ns8`) declared only on
+ * the source root, which is replaced by DEFAULT_DOCX_DEFS on export.
+ *
+ * Declaring the prefix keeps the document valid whatever its origin. Mutates
+ * `attributes` in place. Idempotent.
+ *
+ * @param {{ name?: string, attributes?: Record<string, unknown>, elements?: Array<unknown> }} node Document tree.
+ * @param {Record<string, string>} attributes Root attributes to declare into.
+ * @returns {void}
+ */
+export const declareMissingNamespaces = (node, attributes) => {
+  const used = collectUsedPrefixes(node);
+  for (const [prefix, localName] of used) {
+    if (attributes[`xmlns:${prefix}`]) continue;
+    // Resolve by the element the prefix qualifies; fall back to a unique
+    // placeholder so the file parses even for a namespace we don't know.
+    attributes[`xmlns:${prefix}`] =
+      KNOWN_NAMESPACE_BY_ELEMENT[localName] ?? `http://schemas.superdoc.dev/unknown/${prefix}`;
+  }
+};
+
 export const isLineBreakOnlyRun = (node) => {
   if (!node) return false;
   if (node.type === 'lineBreak' || node.type === 'hardBreak') return true;
@@ -510,6 +585,11 @@ function translateDocumentNode(params) {
     elements: translatedBackgroundNode ? [translatedBackgroundNode, translatedBodyNode] : [translatedBodyNode],
     attributes,
   };
+
+  // Word can emit elements under generated prefixes (ns5/ns6/ns8) that the
+  // source declared locally; DEFAULT_DOCX_DEFS does not carry them, so bind any
+  // that survived into the tree or the file is malformed.
+  declareMissingNamespaces(node, attributes);
 
   // SD-2912: normalize every <w:pgMar> in the final tree to integer twips,
   // catching both the body sectPr path (already integer-correct via
